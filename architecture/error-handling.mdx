@@ -1,0 +1,248 @@
+---
+title: "Error handling, retry logic, and fallback behavior"
+description: "How Transmute classifies errors, applies exponential backoff, invokes fallback translations, and propagates failures through shared state."
+---
+
+Transmute is designed to keep translations moving even when things go wrong. The retry handler classifies every exception, waits an appropriate amount of time, and tries again up to three times. If every attempt fails, a fallback function produces a placeholder translation rather than crashing the workflow. A middleware pipeline normalizes code on the way in and validates quality on the way out. Any errors that escape both layers are appended to the `errors` list on `TransmuteState` so the caller knows what happened.
+
+## RetryHandler
+
+`RetryHandler` (from `transmute/agents/retry_handler.py`) wraps any callable with exponential backoff and optional fallback logic.
+
+```python
+class RetryHandler:
+    def __init__(
+        self,
+        max_retries: int = 3,
+        base_delay: float = 1.0,
+        max_delay: float = 60.0,
+        exponential_base: float = 2.0
+    ):
+```
+
+The default configuration is:
+
+| Parameter | Value |
+|---|---|
+| `max_retries` | 3 |
+| `base_delay` | 1.0 s |
+| `exponential_base` | 2.0 |
+| `max_delay` | 60.0 s |
+
+In practice, the workflow configures `max_delay=30` and a `base_delay` that produces delays of 2 s, 4 s, and 8 s across three attempts (matching the documented retry behavior in `Workflow.md`).
+
+### execute_with_retry
+
+This is the primary entry point. It runs the function, catches exceptions, classifies them, and retries with an appropriate delay:
+
+```python
+result = handler.execute_with_retry(
+    func=lambda: self.translation_agent(processed_state),
+    fallback=lambda: self._fallback_translation(processed_state)
+)
+```
+
+The loop runs while `attempt <= max_retries`. On each failure it:
+1. Classifies the error and records it in `error_history`
+2. Calls `should_retry` — if `False`, breaks immediately
+3. Calls `calculate_delay` and sleeps
+4. Increments `attempt`
+
+If the loop ends without success and a `fallback` was provided, the fallback is called. If the fallback also raises, or no fallback exists, the last exception is re-raised.
+
+## Error classification
+
+`classify_error` maps exception types and message substrings to four severity levels:
+
+<AccordionGroup>
+  <Accordion title="CRITICAL — never retried">
+    `KeyboardInterrupt` and `SystemExit`. The handler returns immediately without sleeping or calling the fallback. These represent intentional process termination, not transient failures.
+
+    ```python
+    if error_type in ['KeyboardInterrupt', 'SystemExit']:
+        return ErrorSeverity.CRITICAL
+    ```
+  </Accordion>
+  <Accordion title="HIGH — rate limits">
+    Exceptions whose message contains `"rate limit"` or `"too many requests"`. The delay multiplier is 2.0, so delays are twice the base exponential sequence. This gives the upstream API time to recover before the next attempt.
+
+    ```python
+    if 'rate limit' in error_str or 'too many requests' in error_str:
+        return ErrorSeverity.HIGH
+    ```
+  </Accordion>
+  <Accordion title="MEDIUM — network and timeout errors">
+    Exceptions whose message contains `"connection"` or `"timeout"`. These cover transient infrastructure issues. The delay multiplier is 1.0 — standard exponential backoff.
+
+    ```python
+    if 'connection' in error_str or 'timeout' in error_str:
+        return ErrorSeverity.MEDIUM
+    ```
+
+    Any exception not matched by a more specific rule also falls into `MEDIUM`.
+  </Accordion>
+  <Accordion title="LOW — validation errors">
+    `ValueError`, `TypeError`, and `KeyError`. These often indicate bad input that may be fixed by the next attempt (for example, if a transient upstream issue corrupted a response). The delay multiplier is 0.5, so waits are shorter than for network errors.
+
+    ```python
+    if error_type in ['ValueError', 'TypeError', 'KeyError']:
+        return ErrorSeverity.LOW
+    ```
+
+    <Warning>
+      Auth errors (such as `401 Unauthorized`) are not explicitly classified and fall into `MEDIUM`, which means they will be retried. If you consistently see auth errors, check your API key configuration rather than relying on retries to recover.
+    </Warning>
+  </Accordion>
+</AccordionGroup>
+
+### Delay calculation
+
+`calculate_delay` computes the wait time from the attempt index and severity multiplier:
+
+```python
+def calculate_delay(self, attempt: int, severity: ErrorSeverity) -> float:
+    severity_multiplier = {
+        ErrorSeverity.LOW: 0.5,
+        ErrorSeverity.MEDIUM: 1.0,
+        ErrorSeverity.HIGH: 2.0,
+        ErrorSeverity.CRITICAL: 0.0
+    }
+
+    delay = self.base_delay * severity_multiplier[severity]
+    delay *= (self.exponential_base ** attempt)
+    return min(delay, self.max_delay)
+```
+
+With `base_delay=1.0` and `exponential_base=2.0`, a `MEDIUM` error produces delays of 1 s, 2 s, and 4 s across three attempts. A `HIGH` error doubles those to 2 s, 4 s, and 8 s — matching the values documented in `Workflow.md`.
+
+## Fallback translation
+
+When all retries are exhausted, the translation node calls `_fallback_translation`. This produces a valid (but empty) translation rather than propagating the exception to the workflow:
+
+```python
+def _fallback_translation(self, state: TransmuteState) -> Dict[str, Any]:
+    plan = state.migration_plan
+    pending = plan.get_pending_units()
+
+    for unit in pending:
+        unit.translated_code = f"// TODO: Translation failed\n{unit.source_code}"
+        unit.confidence_score = 0.0
+        unit.mark_failed("LLM translation unavailable")
+
+    return {
+        "migration_plan": plan,
+        "current_step": "validation"
+    }
+```
+
+The output contains the original source code prefixed with a `// TODO: Translation failed` comment and a `confidence_score` of `0.0`. The validation step and quality-check middleware will flag these units as needing review.
+
+<Tip>
+Units that went through fallback have `confidence_score=0.0` and a `TODO` comment. You can filter them in the output with `plan.get_failed_units()` to identify which files need manual attention.
+</Tip>
+
+## Middleware pipeline
+
+The middleware pipeline runs synchronously before and after agent execution. Each `Middleware` subclass implements `process(data, context)` and is called in registration order. If a middleware raises, the pipeline logs the error and continues with the unmodified data — middleware failures do not stop the translation.
+
+### Pre-processing
+
+**CodeNormalizationMiddleware** runs before translation. It strips trailing whitespace from every line and collapses consecutive blank lines to a single blank line:
+
+```python
+class CodeNormalizationMiddleware(Middleware):
+    def process(self, data: str, context=None) -> str:
+        lines = [line.rstrip() for line in data.splitlines()]
+
+        normalized = []
+        prev_blank = False
+        for line in lines:
+            is_blank = not line.strip()
+            if is_blank and prev_blank:
+                continue
+            normalized.append(line)
+            prev_blank = is_blank
+
+        return '\n'.join(normalized)
+```
+
+**CommentPreservationMiddleware** extracts lines starting with `#` or `//` before the LLM sees the code and stores them in `unit.metadata['preserved_comments']`. This allows post-processing to restore comments that the LLM might otherwise drop.
+
+### Post-processing
+
+**QualityCheckMiddleware** runs after translation. It calculates a quality score from 0.0 to 1.0 and stores it in `unit.metadata['quality_score']`:
+
+```python
+def _calculate_quality(self, unit: TranslationUnit) -> float:
+    score = 1.0
+
+    if not code or len(code) < 10:
+        score -= 0.5
+    if code.count('{') != code.count('}'):
+        score -= 0.2
+    if code.count('(') != code.count(')'):
+        score -= 0.2
+    if 'TODO' in code or 'FIXME' in code:
+        score -= 0.3
+    if len(code.strip()) < 50:
+        score -= 0.2
+
+    return max(0.0, min(1.0, score))
+```
+
+When the score falls below `min_quality` (default `0.5`), the middleware sets `unit.metadata['needs_review'] = True`. Fallback translations always contain `TODO`, so they receive a score of at most 0.7 from this check — typically lower once other penalties apply.
+
+### Building a pipeline
+
+Middleware is registered via a fluent `add` API on `MiddlewarePipeline`:
+
+```python
+pipeline = MiddlewarePipeline("translation")
+pipeline.add(CodeNormalizationMiddleware()) \
+        .add(CommentPreservationMiddleware()) \
+        .add(QualityCheckMiddleware(min_quality=0.5))
+
+result = pipeline.process(unit)
+```
+
+Individual middleware can be disabled without removal:
+
+```python
+pipeline.disable_all()       # pause entire pipeline
+pipeline.enable_all()        # resume
+pipeline.remove("QualityCheck")  # remove by name
+```
+
+## Error propagation to state
+
+If an agent raises after all retries and the fallback also fails, the node method catches the exception and appends it to `TransmuteState.errors`:
+
+```python
+try:
+    updates = agent(state)
+except Exception as e:
+    logger.error(f"Agent failed: {e}")
+    return {
+        "errors": state.errors + [str(e)],
+        "current_step": "error"
+    }
+```
+
+`TransmuteState.errors` is a list of strings. Callers can inspect it after the workflow completes to determine whether any agent encountered unrecoverable failures:
+
+```python
+final_state = workflow.run(state)
+if final_state.errors:
+    for error in final_state.errors:
+        print(f"Error: {error}")
+```
+
+`RetryHandler` also maintains its own `error_history` list for introspection within a single execution:
+
+```python
+history = handler.get_error_history()
+for record in history:
+    print(f"Attempt {record['attempt']}: {record['error']} ({record['severity']})")
+```
+
+Call `handler.reset()` to clear the history between workflow runs.

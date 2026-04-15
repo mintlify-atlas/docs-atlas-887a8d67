@@ -1,0 +1,88 @@
+---
+title: "Transmute: AI-powered repository code translation"
+description: "Transmute translates entire code repositories between programming languages using multi-agent AI, RAG, and intelligent strategy selection."
+---
+
+Transmute is a production-ready CLI tool that translates code repositories between programming languages while preserving functionality, structure, and idioms. It combines Claude Sonnet, LangGraph orchestration, and a retrieval-augmented generation (RAG) system to handle everything from simple scripts to complex codebases with paradigm shifts. This page covers what Transmute does, the languages it supports, its key capabilities, and the technology stack that powers it.
+
+## What Transmute does
+
+Transmute clones a repository, analyzes its code with AST parsing and complexity metrics, selects the best translation strategy, and outputs translated files to a directory of your choice. Rather than a simple find-and-replace approach, Transmute uses specialized AI agents for each phase—analysis, planning, translation, and validation—coordinated by a LangGraph state machine.
+
+The result is translated code that respects target-language idioms: type annotations when moving from Python to Java, proper module patterns when targeting JavaScript, and so on.
+
+## Supported languages
+
+Transmute can translate repositories to and from any combination of these six languages:
+
+<CardGroup cols={3}>
+  <Card title="Python" icon="snake">
+    Python 3.12+, including classes, decorators, and type hints.
+  </Card>
+  <Card title="Java" icon="coffee">
+    Java with full object-oriented paradigm mapping and type inference.
+  </Card>
+  <Card title="JavaScript" icon="js">
+    Modern ES module patterns and asynchronous code structures.
+  </Card>
+  <Card title="TypeScript" icon="code">
+    Typed JavaScript output with interface and enum generation.
+  </Card>
+  <Card title="C#" icon="hashtag">
+    .NET-compatible C# with proper namespace and class structure.
+  </Card>
+  <Card title="PHP" icon="php">
+    PHP with modern class-based patterns and namespace support.
+  </Card>
+</CardGroup>
+
+## Key capabilities
+
+<CardGroup cols={2}>
+  <Card title="Multi-agent system" icon="users">
+    Four specialized agents handle analysis, planning, translation, and validation independently, each focused on its phase of the pipeline.
+  </Card>
+  <Card title="RAG-powered translation" icon="database">
+    A Qdrant vector database stores translation patterns. The Pattern strategy retrieves similar examples at runtime to improve output quality.
+  </Card>
+  <Card title="Four translation strategies" icon="shuffle">
+    Direct, Pattern, Refactor, and Hybrid strategies are selected automatically based on code complexity, or you can specify one explicitly with `--strategy`.
+  </Card>
+  <Card title="AST analysis" icon="tree">
+    Tree-sitter parses source code into abstract syntax trees for deep structural understanding, symbol table generation, and dependency graph mapping.
+  </Card>
+  <Card title="Human-in-the-loop (HITL)" icon="user-check">
+    Enable manual review checkpoints with `--hitl` to inspect and approve translations before they are written to disk.
+  </Card>
+  <Card title="Quality validation" icon="check-circle">
+    The Validation agent scores each translated file with a confidence metric. Files below the threshold are flagged or retried automatically.
+  </Card>
+</CardGroup>
+
+## Technology stack
+
+| Component | Technology | Role |
+|-----------|-----------|------|
+| AI model | Claude Sonnet 4 (`claude-sonnet-4-20250514`) | Code translation and reasoning |
+| Orchestration | LangGraph 0.2.55+ | State-driven agent workflow with checkpointing |
+| Vector database | Qdrant 1.12+ | RAG pattern storage and similarity search |
+| AST parsing | Tree-sitter 0.23+ | Source code structural analysis |
+| Embeddings | sentence-transformers 3.3+ | Vector embedding for RAG |
+| CLI framework | Typer + Rich | Command-line interface and progress display |
+
+## Explore the docs
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Translate your first repository in under five minutes.
+  </Card>
+  <Card title="CLI reference: translate" icon="terminal" href="/cli/translate">
+    All options and flags for the `transmute translate` command.
+  </Card>
+  <Card title="Translation strategies" icon="map" href="/guides/translation-strategies">
+    When to use Direct, Pattern, Refactor, or Hybrid strategies.
+  </Card>
+  <Card title="Architecture overview" icon="building" href="/architecture/overview">
+    How the agent pipeline, RAG system, and workflow fit together.
+  </Card>
+</CardGroup>

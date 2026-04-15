@@ -1,0 +1,126 @@
+---
+title: "Environment variables and configuration settings"
+description: "Configure Transmute using environment variables and a YAML config file to set your API keys, model, RAG connection, and runtime behavior."
+---
+
+Transmute reads configuration from two sources: environment variables (for secrets and quick overrides) and a YAML config file at `config/default.yaml` (for structured defaults). Environment variables always take precedence over the YAML file.
+
+## Environment variables
+
+### Required
+
+<ParamField path="ANTHROPIC_API_KEY" type="string" required>
+  Your Anthropic API key. Transmute uses this to call Claude Sonnet for all translation and analysis tasks. Get one from the [Anthropic Console](https://console.anthropic.com).
+</ParamField>
+
+### Optional
+
+<ParamField path="QDRANT_URL" type="string" default="http://localhost:6333">
+  URL of your Qdrant vector database instance. Transmute connects here for RAG-based pattern retrieval. Only needed when running with RAG enabled (the default). See the [Docker setup guide](/configuration/docker) to start a local Qdrant instance.
+</ParamField>
+
+<ParamField path="QDRANT_API_KEY" type="string">
+  API key for a secured Qdrant deployment. Leave unset for a local instance running without authentication.
+</ParamField>
+
+<ParamField path="CLAUDE_MODEL" type="string" default="claude-sonnet-4-20250514">
+  The Claude model identifier to use for translation. Defaults to Claude Sonnet 4. You can override this to use a different Anthropic model if needed.
+</ParamField>
+
+<ParamField path="MAX_RETRIES" type="number" default="3">
+  Number of retry attempts when a translation or API call fails. Transmute uses exponential backoff between retries.
+</ParamField>
+
+<ParamField path="CONFIDENCE_THRESHOLD" type="number" default="0.7">
+  Minimum validation score (0.0–1.0) for a translated file to be accepted without flagging. Files scoring below this threshold are marked for review. See [human-in-the-loop](/guides/human-in-the-loop) for more on review workflows.
+</ParamField>
+
+<Warning>
+  Never commit `ANTHROPIC_API_KEY` to source control. Add `.env` to your `.gitignore` before running `git add`.
+</Warning>
+
+## Setting up a .env file
+
+Create a `.env` file in the project root by copying the example:
+
+<Steps>
+  <Step title="Copy the example file">
+    ```bash
+    cp .env.example .env
+    ```
+  </Step>
+  <Step title="Add your API key">
+    Open `.env` in your editor and set `ANTHROPIC_API_KEY`:
+
+    ```bash .env
+    ANTHROPIC_API_KEY="sk-ant-..."
+
+    # Optional overrides
+    QDRANT_URL=http://localhost:6333
+    CLAUDE_MODEL=claude-sonnet-4-20250514
+    MAX_RETRIES=3
+    CONFIDENCE_THRESHOLD=0.7
+    ```
+  </Step>
+  <Step title="Verify the file is ignored">
+    ```bash
+    grep ".env" .gitignore
+    ```
+
+    If `.env` is not listed, add it:
+
+    ```bash
+    echo ".env" >> .gitignore
+    ```
+  </Step>
+</Steps>
+
+## YAML configuration file
+
+For structured settings beyond environment variables, Transmute loads `config/default.yaml` at startup. This file controls LLM parameters, RAG behavior, logging, and data paths.
+
+```yaml config/default.yaml
+transmute:
+  version: "0.1.0"
+
+  # LLM settings
+  llm:
+    provider: "anthropic"
+    model: "claude-sonnet-4-20250514"
+    temperature: 0.1
+    max_tokens: 4096
+    timeout: 60
+
+  # RAG settings
+  rag:
+    vector_store: "qdrant"
+    qdrant_url: "http://localhost:6333"
+    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+    collection_name: "transmute-code"
+    chunk_size: 1000
+    chunk_overlap: 200
+    top_k: 5
+    similarity_threshold: 0.7
+
+  # Paths
+  data_dir: "/tmp/transmute"
+
+  # Logging
+  log_level: "INFO"
+  log_file: null
+```
+
+### Key YAML settings
+
+| Field | Description |
+|---|---|
+| `llm.temperature` | Controls translation creativity. Lower values (like `0.1`) produce more consistent output. |
+| `llm.max_tokens` | Maximum tokens per Claude response. Increase for very large files. |
+| `rag.chunk_size` | Size of code chunks indexed into Qdrant. Larger chunks carry more context. |
+| `rag.top_k` | Number of similar patterns retrieved from Qdrant per translation request. |
+| `rag.similarity_threshold` | Minimum cosine similarity for a retrieved pattern to be included in the prompt. |
+| `log_level` | Set to `DEBUG` for verbose output during development. |
+
+<Tip>
+  Override individual YAML settings with environment variables during development without editing the file. For production deployments, prefer the YAML file for stable, version-controlled configuration.
+</Tip>

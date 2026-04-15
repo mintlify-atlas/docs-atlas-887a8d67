@@ -1,0 +1,130 @@
+---
+title: "Review translations manually with human-in-the-loop"
+description: "Transmute's HITL system pauses the workflow so you can approve, reject, modify, or skip individual translated files before they are written to disk."
+---
+
+By default, Transmute finalizes translations automatically once the Validation Agent assigns a confidence score. Human-in-the-loop (HITL) mode changes that: the workflow pauses after each translation and waits for your decision before writing the output. This gives you a checkpoint to catch subtle logic errors, incorrect idiom choices, or structural problems that automated scoring might miss.
+
+## What HITL does
+
+The `HITLSystem` sits between the Translation Agent and the output write step. For each completed translation unit, it runs `needs_review()` to determine whether the file requires human attention. If review is needed, it calls `request_review()` and waits for a `ReviewDecision`.
+
+**A review is automatically triggered when any of the following is true:**
+
+- `confidence_score` is `None` (translation produced no score)
+- `confidence_score < confidence_threshold` (default `0.7`)
+- The translation unit has `status == "failed"`
+- The file's `complexity_score > 0.8` (flagged as very high complexity)
+
+```python
+# From HITLSystem.needs_review() in agents/hitl.py
+if unit.confidence_score < self.confidence_threshold:
+    return True
+
+if unit.status == "failed":
+    return True
+
+if state.feature_profile.complexity_score > 0.8:
+    return True
+```
+
+## How to enable it
+
+Pass `--hitl` to the `translate` command:
+
+```bash
+transmute translate https://github.com/user/repo \
+    --to java \
+    --hitl
+```
+
+The workflow pauses at each file that triggers a review and presents you with the source code, the translated code, and the confidence score. You then choose a decision.
+
+## Review decisions
+
+The `ReviewDecision` enum defines five possible actions:
+
+| Decision | Effect |
+|----------|--------|
+| `approve` | Accept the translation as-is and write it to disk |
+| `reject` | Discard this translation unit; it is not written to disk |
+| `modify` | Accept with your edits — you provide the corrected code |
+| `skip` | Defer the unit for now; it remains in a pending state |
+| `fallback` | Use a fallback approach for this unit |
+
+When you choose `modify`, HITL calls `apply_correction()` to store your version:
+
+```python
+# From HITLSystem.apply_correction()
+unit.translated_code = corrected_code
+unit.confidence_score = 1.0   # human-corrected = maximum confidence
+unit.metadata['human_reviewed'] = True
+```
+
+Human-corrected units receive a confidence score of `1.0`, the highest possible value, and are flagged in metadata for downstream tracking.
+
+## Review workflow
+
+<Steps>
+  <Step title="Translation completes for a file">
+    The Translation Agent writes `translated_code` and `confidence_score` to the unit. For example: `confidence_score = 0.62`.
+  </Step>
+  <Step title="HITL checks whether review is needed">
+    `needs_review()` compares the confidence score against the threshold (`0.7` by default). Since `0.62 < 0.7`, it returns `True`.
+  </Step>
+  <Step title="Review is presented to you">
+    `request_review()` surfaces the unit data including the source path, confidence score, and up to 500 characters of both the source and translated code.
+  </Step>
+  <Step title="You make a decision">
+    Choose `approve`, `reject`, `modify`, `skip`, or `fallback`. If you choose `modify`, provide the corrected code.
+  </Step>
+  <Step title="Decision is recorded and workflow continues">
+    The decision is appended to `review_history`. If you approved or modified, the unit is written to disk. The workflow moves to the next unit.
+  </Step>
+</Steps>
+
+## When to use HITL
+
+Use `--hitl` when:
+
+- **You are doing a complex migration** — particularly paradigm shifts like Python to Java or JavaScript to TypeScript, where structural decisions are difficult to validate automatically
+- **The codebase is high-stakes** — production services, financial logic, or security-sensitive code where an incorrect translation could cause real harm
+- **Confidence scores are low** — if your first run shows many units with scores below `0.7`, rerun with `--hitl` to review those files individually
+- **You want to build a correction dataset** — HITL tracks all corrections and lets you export them for use as RAG training patterns
+
+## Tracking and exporting corrections
+
+The HITL system records every review and correction during a session:
+
+```python
+from transmute.agents.hitl import HITLSystem
+from pathlib import Path
+
+# Get review statistics
+stats = hitl.get_review_statistics()
+print(f"Total reviews: {stats['total_reviews']}")
+print(f"Approval rate: {stats['approval_rate']:.0%}")
+print(f"Modification rate: {stats['modification_rate']:.0%}")
+print(f"Corrections made: {stats['correction_count']}")
+
+# Export corrections to JSON for later use as RAG patterns
+count = hitl.export_corrections(Path("corrections.json"))
+print(f"Exported {count} corrections")
+```
+
+Exported corrections include the original translated code and your corrected version, making them suitable for importing into the RAG pattern index to improve future translations.
+
+<Tip>
+  Combine `--hitl` with `--strategy refactor` when migrating complex codebases. Refactor produces the most structurally significant changes, and HITL lets you verify each file before it is written — catching cases where Claude restructured code in an unexpected but technically valid way.
+</Tip>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Translation strategies" icon="brain" href="/guides/translation-strategies">
+    Understand how confidence scores are determined per strategy
+  </Card>
+  <Card title="RAG system" icon="database" href="/guides/rag-system">
+    Export HITL corrections and import them as RAG patterns to improve future runs
+  </Card>
+</CardGroup>

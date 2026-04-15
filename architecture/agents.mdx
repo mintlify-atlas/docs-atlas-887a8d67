@@ -1,0 +1,318 @@
+---
+title: "Specialized agents in the Transmute pipeline"
+description: "How the four Transmute agents — Analysis, Planning, Translation, and Validation — read shared state, do their work, and return state updates."
+---
+
+Transmute's translation pipeline is divided among four independent agents, each responsible for a distinct phase of the migration. Every agent is a subclass of `BaseAgent` that implements a single `process(state)` method. Agents do not call each other. Instead, each one reads what it needs from the shared `TransmuteState`, performs its work, and returns a Python dict of updates. LangGraph merges that dict into the state object before the next agent runs.
+
+## How agents communicate
+
+```python
+# Agents read from state
+repo_url = state.repository.url
+
+# Agents return a dict — never mutate state directly
+return {
+    "source_language": detected_language,
+    "feature_profile": feature_profile,
+    "current_step": "planning"
+}
+
+# LangGraph merges the dict into TransmuteState automatically
+```
+
+<Info>
+All four agents are registered with an `AgentOrchestrator` instance. The workflow calls `orchestrator.register_agent()` and `orchestrator.set_execution_order()` at initialization, but the actual sequencing is driven by LangGraph's `StateGraph` edges — the orchestrator provides the underlying agent instances.
+</Info>
+
+## AgentOrchestrator
+
+The `AgentOrchestrator` manages agent registration, execution order, and lifecycle callbacks. It is initialized in `TransmuteWorkflow.__init__()` and each agent is registered by name before the LangGraph is compiled.
+
+```python
+self.orchestrator = AgentOrchestrator()
+
+self.orchestrator.register_agent("analysis", self.analysis_agent)
+self.orchestrator.register_agent("planning", self.planning_agent)
+self.orchestrator.register_agent("translation", self.translation_agent)
+self.orchestrator.register_agent("validation", self.validation_agent)
+
+self.orchestrator.set_execution_order([
+    "analysis", "planning", "translation", "validation"
+])
+```
+
+You can attach lifecycle callbacks to the orchestrator for observability:
+
+```python
+def on_agent_complete(agent_name: str, state: TransmuteState) -> None:
+    print(f"{agent_name} finished — step: {state.current_step}")
+
+orchestrator.register_callback("after_agent", on_agent_complete)
+```
+
+Supported events: `before_agent`, `after_agent`, `on_error`, `on_complete`.
+
+---
+
+## AnalysisAgent
+
+`AnalysisAgent` clones the repository, detects the source language, analyzes code features with AST parsing, and produces a `FeatureProfile`. Its output gives every downstream agent the structured knowledge they need about the codebase.
+
+<Tabs>
+  <Tab title="Input">
+    Reads from `TransmuteState`:
+
+    | Field | Source | Description |
+    |-------|--------|-------------|
+    | `state.repository.url` | CLI input | Git URL of the repository to analyze |
+    | `state.repository.branch` | CLI input | Branch to clone (defaults to `main`) |
+    | `state.metadata['repository_url']` | Fallback | Alternative URL location in metadata |
+
+  </Tab>
+  <Tab title="Output">
+    Returns state updates:
+
+    ```python
+    return {
+        "repository": analysis_results['metadata'],   # RepositoryMetadata
+        "source_language": analysis_results['languages'][0],  # LanguageInfo
+        "feature_profile": feature_profile,           # FeatureProfile
+        "metadata": {
+            **state.metadata,
+            "clone_path": str(analysis_results['clone_path']),
+            "file_map": {k: [str(p) for p in v]
+                         for k, v in analysis_results['file_map'].items()},
+            "analysis_report": repo_report,
+            "feature_report": feature_report,
+        },
+        "current_step": "planning",
+    }
+    ```
+
+  </Tab>
+  <Tab title="FeatureProfile">
+    The `FeatureProfile` Pydantic model captures what the source code actually uses:
+
+    ```python
+    class FeatureProfile(BaseModel):
+        language: str
+        features_used: Dict[str, int]      # e.g., {"classes": 45, "decorators": 23}
+        complexity_score: float            # 0.0 (simple) → 1.0 (complex)
+        patterns_detected: List[str]       # e.g., ["Singleton", "Factory"]
+        external_dependencies: List[str]
+        framework_detected: Optional[str]  # e.g., "Django", "Spring Boot"
+    ```
+
+  </Tab>
+</Tabs>
+
+---
+
+## PlanningAgent
+
+`PlanningAgent` reads the analysis output and constructs a `MigrationPlan`. The core decision it makes is strategy selection: it maps the `complexity_score` from the `FeatureProfile` to one of three `StrategyType` values.
+
+<Tabs>
+  <Tab title="Input">
+    Reads from `TransmuteState`:
+
+    | Field | Set by | Description |
+    |-------|--------|-------------|
+    | `state.source_language` | AnalysisAgent | Detected source language |
+    | `state.target_language` | CLI input | Target language specified by user |
+    | `state.feature_profile` | AnalysisAgent | Complexity score and feature data |
+    | `state.metadata['file_map']` | AnalysisAgent | Map of language → list of file paths |
+    | `state.metadata['max_files']` | CLI input | Optional cap on files to translate |
+
+  </Tab>
+  <Tab title="Strategy selection">
+    Strategy is chosen from `complexity_score` on the `FeatureProfile`:
+
+    ```python
+    complexity = state.feature_profile.complexity_score
+
+    if complexity < 0.3:
+        strategy = StrategyType.DIRECT    # Fast 1:1 translation
+    elif complexity < 0.7:
+        strategy = StrategyType.PATTERN   # RAG-assisted pattern matching
+    else:
+        strategy = StrategyType.REFACTOR  # Full paradigm-shift handling
+    ```
+
+    | Strategy | Complexity range | Best for |
+    |----------|-----------------|----------|
+    | `DIRECT` | < 0.3 | Simple code, similar language paradigms |
+    | `PATTERN` | 0.3 – 0.7 | Common patterns where RAG context helps |
+    | `REFACTOR` | ≥ 0.7 | Complex code requiring architectural changes |
+
+  </Tab>
+  <Tab title="Output">
+    Returns state updates:
+
+    ```python
+    return {
+        "migration_plan": MigrationPlan(
+            plan_id=str(uuid.uuid4()),
+            source_language=source_lang,
+            target_language=state.target_language.name,
+            total_units=len(translation_units),
+            translation_units=translation_units,  # one per file
+            execution_order=execution_order,
+            overall_strategy=strategy,
+            estimated_duration_minutes=estimated_duration,
+            estimated_complexity=complexity,
+            dependencies_resolved=True,
+        ),
+        "current_step": "translation",
+    }
+    ```
+
+    Each `TranslationUnit` starts with `status=TranslationStatus.PENDING` and holds the file path, priority, and complexity estimate.
+  </Tab>
+</Tabs>
+
+---
+
+## TranslationAgent
+
+`TranslationAgent` iterates over every `PENDING` unit in the migration plan, loads the source file from the cloned repository, optionally retrieves similar patterns from the RAG system, and calls Claude to produce the translated code.
+
+<Tabs>
+  <Tab title="Input">
+    Reads from `TransmuteState`:
+
+    | Field | Set by | Description |
+    |-------|--------|-------------|
+    | `state.migration_plan` | PlanningAgent | Plan containing pending translation units |
+    | `state.source_language` | AnalysisAgent | Source language for Claude prompt |
+    | `state.target_language` | CLI input | Target language for Claude prompt |
+    | `state.feature_profile` | AnalysisAgent | Passed to Claude for context |
+    | `state.metadata['clone_path']` | AnalysisAgent | Local path where repo was cloned |
+
+  </Tab>
+  <Tab title="Translation loop">
+    For each pending unit:
+
+    ```python
+    for unit in pending:
+        unit.mark_in_progress()
+
+        # Load source file from cloned repo
+        file_path = Path(clone_path) / unit.source_path
+        unit.source_code = file_path.read_text()
+
+        # Retrieve RAG context (optional)
+        if self.rag_system:
+            context_patterns = self.rag_system.retrieve_context(
+                query_code=unit.source_code[:500],
+                source_language=state.source_language.name,
+                target_language=state.target_language.name,
+                top_k=3
+            )
+
+        # Call Claude
+        result = self.claude_client.translate_code(
+            source_code=unit.source_code,
+            source_language=state.source_language.name,
+            target_language=state.target_language.name,
+            feature_profile=state.feature_profile,
+            context_patterns=context_patterns
+        )
+
+        # Store results on the unit
+        unit.translated_code = result['translated_code']
+        unit.confidence_score = result.get('confidence', 0.8)
+        unit.translation_strategy = 'llm_with_rag' if context_patterns else 'llm'
+        unit.mark_completed()
+    ```
+
+  </Tab>
+  <Tab title="Output">
+    Returns state updates:
+
+    ```python
+    return {
+        "migration_plan": plan,      # Updated — units now have translated_code
+        "current_step": "validation",
+    }
+    ```
+
+    Each completed `TranslationUnit` carries:
+    - `translated_code` — the translated file contents
+    - `confidence_score` — float between 0.0 and 1.0
+    - `translation_strategy` — `"llm_with_rag"` or `"llm"` or `"placeholder"`
+
+  </Tab>
+</Tabs>
+
+<Warning>
+If `ClaudeClient` is unavailable or all retries fail, the Translation Agent writes a `// TODO: Translation failed` placeholder and marks the unit as `FAILED`. The workflow continues to the Validation Agent regardless.
+</Warning>
+
+---
+
+## ValidationAgent
+
+`ValidationAgent` iterates over every `COMPLETED` unit and runs structural checks on the translated code. It produces a `ValidationResult` per unit and calculates an average quality score across all translations.
+
+<Tabs>
+  <Tab title="Input">
+    Reads from `TransmuteState`:
+
+    | Field | Set by | Description |
+    |-------|--------|-------------|
+    | `state.migration_plan` | TranslationAgent | Plan containing completed units |
+
+  </Tab>
+  <Tab title="Quality scoring">
+    For each completed unit:
+
+    ```python
+    def _calculate_quality_score(
+        self,
+        unit,
+        compilation_successful: bool,
+        warnings: List[str]
+    ) -> float:
+        score = 1.0
+
+        if not compilation_successful:
+            score -= 0.5          # Compilation failure penalty
+
+        score -= len(warnings) * 0.1   # Per-warning penalty
+
+        if unit.confidence_score:
+            score = (score + unit.confidence_score) / 2   # Average with LLM confidence
+
+        return max(0.0, min(1.0, score))
+    ```
+
+    Syntax checks look for mismatched braces `{}` and parentheses `()` as initial indicators of structural problems.
+  </Tab>
+  <Tab title="Output">
+    Returns state updates:
+
+    ```python
+    return {
+        "validation_results": [
+            ValidationResult(
+                is_valid=True,
+                compilation_successful=True,
+                compilation_errors=[],
+                warnings=[],
+                quality_score=0.96,
+            ),
+            # ... one per completed unit
+        ],
+        "metadata": {
+            **state.metadata,
+            "average_quality": avg_quality,
+            "validation_count": len(validation_results),
+        },
+        "current_step": "completed",
+    }
+    ```
+
+  </Tab>
+</Tabs>

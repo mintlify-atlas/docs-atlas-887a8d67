@@ -1,0 +1,241 @@
+---
+title: "Translation strategies: Direct, Pattern, Refactor, Hybrid"
+description: "Transmute offers four translation strategies — Direct, Pattern, Refactor, and Hybrid — automatically selected based on a complexity score from 0.0 to 1.0."
+---
+
+Transmute selects a translation strategy for each file based on a complexity score computed during analysis. The score reflects factors like feature density, paradigm differences, and the difficulty of mapping source-language constructs to the target language. You can let the selector choose automatically or override it with the `--strategy` flag.
+
+## How automatic selection works
+
+The `StrategySelector` scores every available strategy against the current translation unit, then picks the highest scorer. The scoring function combines two factors:
+
+- **Difficulty estimate** — how hard the strategy finds the translation (lower difficulty boosts the score)
+- **Complexity match** — how well the strategy's sweet spot aligns with the file's `complexity_score`
+
+The `complexity_score` comes from the feature profile built by the Analysis Agent and runs from `0.0` (trivially simple) to `1.0` (extremely complex).
+
+```python
+# From selector.py — simplified scoring logic
+if strategy.name == 'direct':
+    score += (1.0 - complexity) * 0.3   # rewards low complexity
+elif strategy.name == 'pattern':
+    score += 0.3 if 0.3 <= complexity <= 0.7 else 0.1
+elif strategy.name == 'refactor':
+    score += complexity * 0.3            # rewards high complexity
+elif strategy.name == 'hybrid':
+    score += 0.2                         # always reasonable
+```
+
+If you pass a preferred strategy via `--strategy`, Transmute will use it as long as `can_handle()` returns `True` for that unit. If the preferred strategy cannot handle the unit, the selector falls back to automatic scoring.
+
+## Strategy comparison
+
+| Strategy | Complexity range | Speed | Quality | Best for |
+|----------|-----------------|-------|---------|----------|
+| Direct | < 0.3 | Fast | High | Simple code, similar language paradigms |
+| Pattern | 0.3 – 0.7 | Medium | Very High | Common patterns, RAG-enriched context |
+| Refactor | > 0.5 | Slow | High | Paradigm shifts, complex code |
+| Hybrid | Any | Medium | High | Mixed-complexity codebases |
+
+## The four strategies
+
+<Tabs>
+  <Tab title="Direct">
+    The Direct strategy performs a 1:1 feature mapping with minimal structural changes. It is designed for code where most features have `trivial` or `easy` mappings in the target language and no major paradigm shift is required.
+
+    **Triggers automatically when:**
+    - `complexity_score < 0.3`
+    - More than 70% of detected features have `trivial` or `easy` mapping difficulty
+
+    **What it produces:**
+
+    ```python
+    # Strategy context prepared by DirectStrategy.prepare_context()
+    context = {
+        'strategy': 'direct',
+        'approach': 'Direct 1:1 translation with minimal changes',
+        'instructions': [
+            'Translate from {source} to {target}',
+            'Maintain the same structure and logic',
+            'Use idiomatic constructs for the target language',
+            'Preserve comments and documentation'
+        ],
+        'complexity': 'low'
+    }
+    ```
+
+    **Example — Python to JavaScript (simple function):**
+
+    ```bash
+    transmute translate https://github.com/user/simple-app \
+        --to javascript \
+        --strategy direct \
+        --max-files 5
+    ```
+
+    ```
+    ✓ Analysis complete: Python repository (complexity: 0.2)
+    ✓ Created plan: 5 units, strategy=direct
+    ✓ Translation complete: 5/5 files (100% success rate)
+    ```
+
+    <Note>
+      Direct strategy refuses units with `complexity_score > 0.5`. If you force `--strategy direct` on a complex file, the selector logs a warning and falls back to automatic scoring.
+    </Note>
+  </Tab>
+  <Tab title="Pattern">
+    The Pattern strategy retrieves similar code snippets from the Qdrant RAG system and uses them as in-context examples for Claude. This gives the model concrete before/after pairs that demonstrate how idioms in the source language translate to the target.
+
+    **Triggers automatically when:**
+    - `complexity_score` is between `0.3` and `0.7`
+    - Score receives an additional boost for each design pattern detected (up to `+0.2`)
+
+    **What it produces:**
+
+    ```python
+    # Strategy context prepared by PatternStrategy.prepare_context()
+    context = {
+        'strategy': 'pattern',
+        'approach': 'Pattern-based translation using similar code examples',
+        'instructions': [
+            'Follow patterns from similar code examples',
+            'Use idiomatic constructs that match the patterns',
+            'Adapt patterns to fit the specific code structure'
+        ],
+        'complexity': 'medium',
+        'use_rag': True   # signals the Translation Agent to query Qdrant
+    }
+    ```
+
+    **Example — Python to Java (medium complexity):**
+
+    ```bash
+    transmute translate https://github.com/user/data-processor \
+        --to java \
+        --strategy pattern
+    ```
+
+    <Tip>
+      Pattern strategy benefits most when the RAG index already contains similar translation pairs. Run `transmute translate` on smaller files first to seed the pattern store before migrating larger ones.
+    </Tip>
+  </Tab>
+  <Tab title="Refactor">
+    The Refactor strategy handles translations that require significant structural restructuring — typically when moving between paradigms such as Python's dynamic duck-typing to Java's static type system. It adds explicit guidance about adding type annotations, interfaces, and target-language design patterns.
+
+    **Triggers automatically when:**
+    - `complexity_score > 0.5` (note the overlap with Pattern; Refactor wins when difficulty from hard feature mappings is also high)
+    - More than 30% of feature mappings have `hard` or `very_hard` difficulty
+
+    **What it produces:**
+
+    ```python
+    # Strategy context prepared by RefactorStrategy.prepare_context()
+    context = {
+        'strategy': 'refactor',
+        'approach': 'Refactor and restructure for target language paradigms',
+        'instructions': [
+            'Restructure code to fit target language paradigms',
+            'Add necessary type annotations, interfaces, or abstractions',
+            'Consider design patterns appropriate for target language',
+            'Maintain functional equivalence while improving structure'
+        ],
+        'complexity': 'high',
+        'use_rag': True,
+        'allow_restructuring': True
+    }
+    ```
+
+    When language compatibility is below `0.5`, the strategy adds explicit warnings to the prompt:
+
+    ```python
+    context['warnings'] = [
+        'Low language compatibility - significant changes needed',
+        'Consider major architectural restructuring',
+        'May require additional helper classes or utilities'
+    ]
+    ```
+
+    **Example — Python to Java (complex migration):**
+
+    ```bash
+    transmute translate https://github.com/user/complex-app \
+        --to java \
+        --strategy refactor \
+        --max-files 20
+    ```
+
+    <Warning>
+      Refactor is the slowest strategy because it instructs Claude to reason about architectural changes for each file, not just syntax. Expect longer translation times on large codebases.
+    </Warning>
+  </Tab>
+  <Tab title="Hybrid">
+    The Hybrid strategy wraps the other three and delegates to the most appropriate one on a per-unit basis. It evaluates the `complexity_score` at runtime and routes each file to Direct (< 0.3), Pattern (0.3 – 0.6), or Refactor (≥ 0.6).
+
+    **Always available** — `HybridStrategy.can_handle()` always returns `True`.
+
+    **Internal routing logic:**
+
+    ```python
+    # From HybridStrategy._select_primary_strategy()
+    complexity = feature_profile.complexity_score if feature_profile else 0.5
+
+    if complexity < 0.3:
+        return self.direct    # low complexity
+    elif complexity < 0.6:
+        return self.pattern   # medium complexity
+    else:
+        return self.refactor  # high complexity
+    ```
+
+    The resulting context always sets `strategy=hybrid` and adds `primary_strategy` to show which sub-strategy was chosen, plus supplementary guidance from the others.
+
+    **Example — mixed codebase:**
+
+    ```bash
+    transmute translate https://github.com/user/mixed-app \
+        --to typescript \
+        --strategy hybrid
+    ```
+
+    <Note>
+      Hybrid is the default when the selector cannot clearly distinguish between Pattern and Refactor. Its score is always `+0.2` relative to the base, making it a reliable fallback for ambiguous cases.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Overriding strategy from the CLI
+
+Pass `--strategy` to any `translate` command to skip automatic selection:
+
+```bash
+transmute translate <repo> --to <lang> --strategy <name>
+```
+
+Valid values are `direct`, `pattern`, `refactor`, and `hybrid`.
+
+```bash
+# Force direct for a known-simple utility library
+transmute translate https://github.com/user/utils --to javascript --strategy direct
+
+# Force refactor for a Python → Java migration
+transmute translate https://github.com/user/service --to java --strategy refactor
+
+# Inspect what each strategy would score for a repository
+transmute strategies list
+transmute strategies explain refactor
+```
+
+<Info>
+  If your preferred strategy cannot handle a given unit (for example, `direct` on a file with `complexity_score = 0.8`), Transmute logs a warning and falls back to automatic scoring for that unit only. The override still applies to all other units.
+</Info>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="RAG system" icon="database" href="/guides/rag-system">
+    How Pattern and Refactor strategies use Qdrant to retrieve similar code examples
+  </Card>
+  <Card title="Human-in-the-loop" icon="person" href="/guides/human-in-the-loop">
+    Pause for manual review when strategy confidence is low
+  </Card>
+</CardGroup>

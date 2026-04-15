@@ -1,0 +1,225 @@
+---
+title: "transmute strategies — list and explain strategies"
+description: "List all available translation strategies and get detailed explanations of when to use each one, with complexity thresholds and code examples."
+---
+
+The `strategies` command provides reference information about Transmute's four translation strategies. Use `strategies list` to see a comparison table, and `strategies explain <strategy>` to get a detailed breakdown of a specific strategy including use-when criteria, features, and a before/after code example.
+
+## Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `strategies list` | Print a table of all strategies with complexity ranges and best-use cases |
+| `strategies explain <strategy>` | Print a detailed explanation for one strategy |
+
+---
+
+## transmute strategies list
+
+```bash
+transmute strategies list
+```
+
+**Output:**
+
+```
+┌───────────┬──────────────────┬──────────────────────────────┐
+│ Strategy  │ Complexity       │ Best For                     │
+├───────────┼──────────────────┼──────────────────────────────┤
+│ Direct    │ Low (< 0.5)      │ Simple code, similar langs   │
+│ Pattern   │ Medium (0.3-0.7) │ Common patterns, RAG ready   │
+│ Refactor  │ High (> 0.5)     │ Paradigm shifts, complex     │
+│ Hybrid    │ Any              │ Mixed complexity             │
+└───────────┴──────────────────┴──────────────────────────────┘
+```
+
+Pass a strategy name to `translate` using `--strategy <name>` to override automatic selection:
+
+```bash
+transmute translate repo.git --to java --strategy pattern
+```
+
+---
+
+## transmute strategies explain
+
+```bash
+transmute strategies explain <strategy>
+```
+
+`<strategy>` must be one of: `direct`, `pattern`, `refactor`, `hybrid`.
+
+### direct
+
+```bash
+transmute strategies explain direct
+```
+
+**Description:** Simple 1:1 translation with minimal changes.
+
+**Use when:**
+- Code has low complexity (score `< 0.5`)
+- Source and target languages have similar paradigms
+- Feature mappings are trivial or easy
+- No major restructuring is needed
+
+**Features:**
+- Minimal context generation — top 5 feature mappings only
+- Fast execution
+- High confidence for simple code
+
+**Example:**
+
+```python
+# Source (Python)
+def greet(name):
+    return f"Hello, {name}"
+```
+
+```javascript
+// Target (JavaScript)
+function greet(name) {
+    return `Hello, ${name}`;
+}
+```
+
+---
+
+### pattern
+
+```bash
+transmute strategies explain pattern
+```
+
+**Description:** Uses similar code patterns retrieved from the RAG database to guide translation.
+
+**Use when:**
+- Medium complexity (score `0.3 – 0.7`)
+- Common patterns are present in the source
+- Similar translations exist in the Qdrant pattern store
+- You want pattern guidance alongside LLM output
+
+**Features:**
+- RAG pattern matching via Qdrant
+- Top 10 feature mappings
+- Pattern examples included in the prompt
+- Moderate context size
+
+**Example:**
+
+```python
+# Source (Python)
+@property
+def name(self):
+    return self._name
+```
+
+```java
+// Target (Java)
+public String getName() {
+    return this.name;
+}
+```
+
+<Note>
+  The `pattern` strategy requires Qdrant to be running. If you pass `--no-rag` to `translate`, strategy selection falls back to `direct` or `refactor` depending on complexity.
+</Note>
+
+---
+
+### refactor
+
+```bash
+transmute strategies explain refactor
+```
+
+**Description:** Major restructuring for paradigm shifts between source and target.
+
+**Use when:**
+- High complexity (score `> 0.5`)
+- Source and target languages have different paradigms (e.g. dynamic → static typing)
+- Feature mappings are hard or require significant changes
+- Significant restructuring is needed
+
+**Features:**
+- Full feature mappings with no limit
+- Alternative implementation approaches
+- Compatibility warnings for hard-to-translate constructs
+- Restructuring guidelines in the prompt
+
+**Example:**
+
+```python
+# Source (Python — dynamic)
+data = [x**2 for x in items if x > 0]
+```
+
+```java
+// Target (Java — static)
+List<Integer> data = items.stream()
+    .filter(x -> x > 0)
+    .map(x -> x * x)
+    .collect(Collectors.toList());
+```
+
+---
+
+### hybrid
+
+```bash
+transmute strategies explain hybrid
+```
+
+**Description:** Combines all three strategies adaptively, selecting the best approach on a per-file basis.
+
+**Use when:**
+- The codebase has mixed complexity (some simple files, some complex)
+- You are unsure which single strategy fits the whole project
+- You want the best possible output across a large project
+
+**Features:**
+- Automatic per-file strategy selection
+- Falls back gracefully between strategies
+- Combined guidance from all three approaches
+- Fallback options when a chosen strategy produces low confidence
+
+**Logic:**
+
+```
+Selects strategy based on per-file complexity:
+  - Simple functions   → Direct
+  - Medium classes     → Pattern
+  - Complex modules    → Refactor
+```
+
+---
+
+## Strategy comparison
+
+| Strategy | Best for | Complexity | Speed | Quality |
+|----------|----------|------------|-------|---------|
+| Direct | Simple code, similar languages | `< 0.3` | Fast | High |
+| Pattern | Common patterns, medium complexity | `0.3 – 0.7` | Medium | Very High |
+| Refactor | Complex code, paradigm shifts | `> 0.5` | Slow | High |
+| Hybrid | Mixed-complexity codebases | Any | Medium | High |
+
+<Tip>
+  When in doubt, use `hybrid`. It adds little overhead compared to `direct` but handles edge cases that would otherwise produce low-confidence output.
+</Tip>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Translation strategies guide" icon="wand-magic-sparkles" href="/guides/translation-strategies">
+    Conceptual guide to strategy selection logic
+  </Card>
+  <Card title="transmute translate" icon="arrow-right-arrow-left" href="/cli/translate">
+    Pass --strategy to override automatic selection
+  </Card>
+  <Card title="transmute analyze" icon="magnifying-glass" href="/cli/analyze">
+    Get the complexity score before choosing a strategy
+  </Card>
+  <Card title="RAG system" icon="database" href="/guides/rag-system">
+    How the pattern strategy uses Qdrant
+  </Card>
+</CardGroup>

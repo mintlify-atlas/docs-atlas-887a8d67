@@ -1,0 +1,141 @@
+---
+title: "Set up Qdrant with Docker Compose for RAG support"
+description: "Start a local Qdrant vector database using Docker Compose to enable RAG-enhanced translations, then verify the connection and manage the container lifecycle."
+---
+
+Transmute's RAG system stores code pattern embeddings in [Qdrant](https://qdrant.tech/), an open-source vector database. Running Qdrant locally with Docker is the fastest way to enable RAG support during development. The project ships a `docker-compose.yml` that starts a single-node Qdrant instance with persistent storage.
+
+## Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine with the Compose plugin installed
+- Port `6333` available on your machine
+
+## Starting Qdrant
+
+From the project root, run:
+
+```bash
+docker-compose up -d
+```
+
+This command starts the `transmute-qdrant` container in detached mode. Docker pulls the `qdrant/qdrant:latest` image on the first run, which may take a minute.
+
+### What docker-compose.yml configures
+
+```yaml docker-compose.yml
+version: '3.8'
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: transmute-qdrant
+    ports:
+      - "6333:6333"   # HTTP API
+      - "6334:6334"   # gRPC API (optional)
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    restart: unless-stopped
+    networks:
+      - transmute-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  qdrant_storage:
+    driver: local
+
+networks:
+  transmute-network:
+    driver: bridge
+```
+
+Key details:
+
+- **Port 6333** — the HTTP REST API that Transmute connects to by default
+- **Port 6334** — the gRPC API, exposed but optional for Transmute's use
+- **`qdrant_storage` volume** — data persists across container restarts; embeddings you index are not lost when you stop the container
+- **`restart: unless-stopped`** — the container restarts automatically if your machine reboots, unless you explicitly stop it
+
+<Note>
+  Transmute stores all code pattern embeddings in a Qdrant collection named `transmute-code`. This collection is created automatically on the first translation run with RAG enabled. You do not need to create it manually.
+</Note>
+
+## Verifying Qdrant is running
+
+After starting the container, confirm Qdrant is healthy:
+
+```bash
+curl http://localhost:6333
+```
+
+A successful response looks like:
+
+```json
+{
+  "title": "qdrant - vector search engine",
+  "version": "1.x.x"
+}
+```
+
+You can also check the container status:
+
+```bash
+docker-compose ps
+```
+
+```
+NAME                 IMAGE                  STATUS
+transmute-qdrant     qdrant/qdrant:latest   Up (healthy)
+```
+
+## When to use RAG vs --no-rag
+
+RAG retrieval adds latency to each file translation because Transmute queries Qdrant for similar patterns before calling Claude. Whether it's worth enabling depends on your use case:
+
+| Scenario | Recommendation |
+|---|---|
+| Translating a codebase for the first time | Start with `--no-rag` to get baseline results quickly |
+| Translating multiple repos with similar patterns | Enable RAG — indexed patterns from earlier runs improve subsequent translations |
+| Working offline or without Docker | Use `--no-rag`; Qdrant is not required |
+| Complex migrations (e.g., Python → Java) | Enable RAG for better idiomatic output |
+| CI/CD pipelines without Docker | Use `--no-rag` unless you provision Qdrant separately |
+
+To skip RAG for a single translation:
+
+```bash
+transmute translate https://github.com/user/repo --to java --no-rag
+```
+
+## Stopping and cleaning up
+
+Stop the container while preserving stored embeddings:
+
+```bash
+docker-compose down
+```
+
+Stop the container **and delete all stored embeddings** (the `qdrant_storage` volume):
+
+```bash
+docker-compose down -v
+```
+
+<Warning>
+  Running `docker-compose down -v` permanently deletes all indexed code patterns. You will need to re-index your codebase on the next translation run if RAG is enabled.
+</Warning>
+
+## Windows users
+
+If you are on Windows without WSL2, use the helper script in the `docker/` directory:
+
+```bat
+docker\start-qdrant.bat
+```
+
+This script runs the equivalent `docker run` command with the same port bindings and volume configuration as the Compose file.

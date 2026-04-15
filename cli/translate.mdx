@@ -1,0 +1,155 @@
+---
+title: "transmute translate — translate a code repository"
+description: "Translate an entire Git repository or local directory to a target language using Claude Sonnet, with optional RAG, strategy overrides, and human review."
+---
+
+The `translate` command is the core of Transmute. Point it at a GitHub URL or a local path and specify a target language — Transmute will clone or read the repository, run its multi-agent pipeline, and write translated files to an output directory. Under the hood, the Analysis, Planning, Translation, and Validation agents coordinate through a LangGraph workflow to produce idiomatic output in the target language.
+
+## Usage
+
+```bash
+transmute translate <REPOSITORY> --to <LANGUAGE> [OPTIONS]
+```
+
+## Arguments
+
+<ParamField path="REPOSITORY" type="string" required>
+  The repository to translate. Accepts either a GitHub URL (`https://github.com/user/repo`) or a local filesystem path (`./my-app`, `/path/to/repo`).
+</ParamField>
+
+## Options
+
+<ParamField query="--to" type="string" required>
+  Target language to translate into. Must be one of: `java`, `python`, `javascript`, `typescript`, `csharp`, `php`.
+
+  Shorthand: `-t`
+</ParamField>
+
+<ParamField query="--output" type="string" default="output">
+  Directory where translated files are written. Created if it does not exist.
+
+  Shorthand: `-o`
+</ParamField>
+
+<ParamField query="--branch" type="string" default="main">
+  Git branch to clone when `REPOSITORY` is a remote URL.
+
+  Shorthand: `-b`
+</ParamField>
+
+<ParamField query="--max-files" type="number" default="50">
+  Maximum number of files to include in the translation run. Useful for testing translations on a subset of a large codebase before committing to a full run.
+</ParamField>
+
+<ParamField query="--strategy" type="string">
+  Override the automatic strategy selection. When omitted, the Planning Agent selects the best strategy based on code complexity. Valid values: `direct`, `pattern`, `refactor`, `hybrid`.
+
+  See [Translation strategies](/guides/translation-strategies) for a full comparison.
+</ParamField>
+
+<ParamField query="--no-rag" type="boolean">
+  Disable the RAG (retrieval-augmented generation) system. By default, Transmute queries a local Qdrant instance to find similar code patterns that enrich Claude's translation prompts. Pass this flag to skip Qdrant — useful when running without Docker or when translating code with no prior patterns in the database.
+</ParamField>
+
+<ParamField query="--hitl" type="boolean">
+  Enable human-in-the-loop review. When set, Transmute pauses before committing each translation unit and prompts you to accept, edit, or reject it. Useful for critical files or when you want fine-grained control over the output.
+
+  See [Human-in-the-loop](/guides/human-in-the-loop) for the full workflow.
+</ParamField>
+
+<ParamField query="--verbose" type="boolean">
+  Enable verbose logging. Prints debug-level output including agent decisions, LLM prompts, and retry events.
+
+  Shorthand: `-v`
+</ParamField>
+
+<ParamField query="--quiet" type="boolean">
+  Suppress all non-error output. Only error messages are printed.
+
+  Shorthand: `-q`
+</ParamField>
+
+## Prerequisites
+
+Before running `translate`, ensure the following are in place:
+
+<Warning>
+  `ANTHROPIC_API_KEY` must be set in your environment or `.env` file. Translation will fail immediately without it.
+</Warning>
+
+- **Anthropic API key**: set `ANTHROPIC_API_KEY` in your environment or run `transmute config init` to create a `.env` template.
+- **Qdrant** (unless using `--no-rag`): start the vector database with `docker-compose up -d`. See [Docker setup](/configuration/docker).
+
+## Examples
+
+### Simple translation — Python to JavaScript
+
+Translate up to five files from a public GitHub repository using the `direct` strategy:
+
+```bash
+transmute translate https://github.com/user/simple-app \
+    --to javascript \
+    --max-files 5 \
+    --strategy direct
+```
+
+**Output:**
+
+```
+✓ Analysis complete: Python repository (complexity: 0.2)
+✓ Created plan: 5 units, strategy=direct
+✓ Translation complete: 5/5 files (100% success rate)
+✓ Files saved to: output/
+```
+
+### Complex migration — Python to Java with refactor strategy
+
+Translate a larger application using the `refactor` strategy, which handles paradigm shifts such as dynamic-to-static typing:
+
+```bash
+transmute translate https://github.com/user/complex-app \
+    --to java \
+    --strategy refactor \
+    --max-files 20
+```
+
+The `refactor` strategy produces full feature mappings, alternative implementation approaches, and compatibility warnings for each file — ideal when the source and target languages differ significantly in paradigm.
+
+### Custom output directory with human-in-the-loop review
+
+Write translated files to `./translated` and pause for manual approval before each file is saved:
+
+```bash
+transmute translate https://github.com/user/python-app \
+    --to java \
+    --output ./translated \
+    --hitl
+```
+
+### Translate a local repository without RAG
+
+Translate a local directory to TypeScript without querying Qdrant:
+
+```bash
+transmute translate ./my-app \
+    --to typescript \
+    --output ./my-app-ts \
+    --no-rag
+```
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Translation strategies" icon="wand-magic-sparkles" href="/guides/translation-strategies">
+    Compare Direct, Pattern, Refactor, and Hybrid strategies
+  </Card>
+  <Card title="RAG system" icon="database" href="/guides/rag-system">
+    How Qdrant pattern retrieval improves translation quality
+  </Card>
+  <Card title="Human-in-the-loop" icon="person" href="/guides/human-in-the-loop">
+    Configure and use interactive review mode
+  </Card>
+  <Card title="transmute analyze" icon="magnifying-glass" href="/cli/analyze">
+    Inspect a repository before translating it
+  </Card>
+</CardGroup>

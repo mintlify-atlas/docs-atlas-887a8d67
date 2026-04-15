@@ -1,0 +1,102 @@
+{
+  "projectType": "cli-tool",
+  "projectName": "Transmute",
+  "projectDescription": "AI-powered CLI tool that translates entire code repositories across 6 programming languages using Claude Sonnet, LangGraph multi-agent orchestration, and RAG with Qdrant.",
+  "theme": "luma",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "CLI Reference",
+            "pages": [
+              "cli/translate",
+              "cli/analyze",
+              "cli/strategies",
+              "cli/config"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/environment",
+              "configuration/languages",
+              "configuration/docker"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/translation-strategies",
+              "guides/rag-system",
+              "guides/human-in-the-loop"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Architecture",
+        "groups": [
+          {
+            "group": "Concepts",
+            "pages": [
+              "architecture/overview",
+              "architecture/agents",
+              "architecture/workflow"
+            ]
+          },
+          {
+            "group": "Internals",
+            "pages": [
+              "architecture/language-plugins",
+              "architecture/rag-internals",
+              "architecture/error-handling"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Translates entire Git repositories between 6 languages: Python, Java, JavaScript, TypeScript, C#, PHP",
+    "LangGraph multi-agent orchestration with 4 specialized agents: Analysis, Planning, Translation, Validation",
+    "RAG system using Qdrant vector database for pattern-based context-aware translation",
+    "Claude Sonnet AI for intelligent, idiom-preserving code translation",
+    "4 translation strategies: Direct, Pattern, Refactor, Hybrid — automatically selected by complexity",
+    "AST analysis with Tree-sitter for deep code structure understanding",
+    "Human-in-the-loop (HITL) support for manual review of critical translations",
+    "Retry mechanism with exponential backoff and fallback translation",
+    "Quality scoring and validation with confidence metrics",
+    "Streaming CLI progress tracking with Rich terminal UI"
+  ],
+  "publicApiSurface": [
+    "transmute translate <repository> --to <language> [--output] [--strategy] [--max-files] [--no-rag] [--hitl]",
+    "transmute analyze <repository> [--detailed]",
+    "transmute strategies list",
+    "transmute strategies explain <strategy>",
+    "transmute config init",
+    "TransmuteWorkflow(registry, rag_system, claude_client, use_hitl)",
+    "TransmuteWorkflow.run(initial_state, thread_id) -> TransmuteState",
+    "TransmuteWorkflow.stream(initial_state, thread_id) -> Generator",
+    "AnalysisAgent(language_registry)",
+    "PlanningAgent(language_registry)",
+    "TranslationAgent(rag_system, claude_client)",
+    "ValidationAgent()",
+    "RAGSystem()",
+    "ClaudeClient()",
+    "LanguageRegistry()",
+    "StrategySelector"
+  ]
+}

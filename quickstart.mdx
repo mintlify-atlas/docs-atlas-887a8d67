@@ -1,80 +1,116 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quickstart: translate your first repository with Transmute"
+description: "Install Transmute with Poetry, configure your Anthropic API key, start Qdrant with Docker, and run your first repository translation in five minutes."
 ---
 
-## Get started in three steps
+This guide walks you through everything you need to run your first translation: installing prerequisites, configuring your API key, starting Qdrant, and translating a real open-source Python repository to Java. By the end you will have translated files in your output directory.
 
-Get your documentation site running locally and make your first customization.
+<Steps>
+  <Step title="Install prerequisites">
+    Transmute requires Python 3.12 or later, Docker (for the Qdrant vector database), and Poetry for dependency management.
 
-### Step 1: Set up your local environment
+    Verify each is available:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    python --version     # must be 3.12+
+    docker --version
+    poetry --version
+    ```
 
-### Step 2: Deploy your changes
+    If Poetry is not installed, follow the [official Poetry installation guide](https://python-poetry.org/docs/#installation).
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    <Info>
+      Docker is only required if you want RAG-powered translation (recommended). You can skip it and use the `--no-rag` flag instead. See the note at the bottom of this page.
+    </Info>
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Clone and install Transmute">
+    Clone the repository and install its dependencies with Poetry:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```bash
+    git clone https://github.com/Oussiddi/Transmute.git && cd Transmute && poetry install
+    ```
 
-### Step 3: Go live
+    Poetry creates a virtual environment and installs all dependencies defined in `pyproject.toml`, including LangChain, LangGraph, Qdrant client, Tree-sitter, and the Anthropic SDK.
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Set your Anthropic API key">
+    Transmute uses Claude Sonnet 4 for translation. Export your Anthropic API key as an environment variable:
+
+    ```bash
+    export ANTHROPIC_API_KEY="your_api_key_here"
+    ```
+
+    To make this persistent across sessions, add the export line to your shell profile (e.g., `~/.bashrc` or `~/.zshrc`).
+
+    <Warning>
+      Translation will not start without a valid `ANTHROPIC_API_KEY`. You can get a key from the [Anthropic console](https://console.anthropic.com/).
+    </Warning>
+  </Step>
+
+  <Step title="Start Qdrant">
+    Qdrant is the vector database that powers pattern-based translation. Start it with Docker Compose from the project root:
+
+    ```bash
+    docker-compose up -d
+    ```
+
+    This pulls the `qdrant/qdrant:latest` image and starts the service on port `6333`. The container restarts automatically unless you stop it manually.
+
+    Verify it is running:
+
+    ```bash
+    curl http://localhost:6333/
+    ```
+  </Step>
+
+  <Step title="Run your first translation">
+    Translate the [python-patterns](https://github.com/faif/python-patterns) repository to Java, limiting to 5 files so the first run completes quickly:
+
+    ```bash
+    transmute translate https://github.com/faif/python-patterns --to java --max-files 5
+    ```
+
+    Transmute analyzes the repository, selects a strategy, translates each file, and validates the output. You will see progress similar to this:
+
+    ```
+    ✓ Analysis complete: Python repository (complexity: 0.43)
+    ✓ Created plan: 5 units, strategy=pattern
+    ✓ Translation complete: 5/5 files (100% success rate)
+    ✓ Files saved to: output/
+    ```
+  </Step>
+
+  <Step title="View your results">
+    Translated files are written to the `output/` directory by default. Use `--output` to specify a different location:
+
+    ```bash
+    ls output/
+    ```
+
+    The summary at the end of each run shows the number of files translated, the success rate, and a confidence score per file. Open any translated file to inspect the Java output.
+  </Step>
+</Steps>
+
+<Note>
+  **No Qdrant? Use `--no-rag`**
+
+  If you cannot run Docker, skip the Qdrant step and pass `--no-rag` to disable pattern retrieval. Transmute falls back to the Direct or Refactor strategy without vector search:
+
+  ```bash
+  transmute translate https://github.com/faif/python-patterns --to java --max-files 5 --no-rag
+  ```
+
+  Translation quality may be lower for complex codebases without RAG. See [Translation strategies](/guides/translation-strategies) for details on when each strategy is used.
+</Note>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Installation" icon="wrench" href="/installation">
+    Full prerequisites, dev dependencies, and environment configuration.
+  </Card>
+  <Card title="CLI reference: translate" icon="terminal" href="/cli/translate">
+    All flags for `transmute translate`, including `--strategy`, `--hitl`, and `--branch`.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

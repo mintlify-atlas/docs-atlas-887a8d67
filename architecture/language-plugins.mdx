@@ -1,0 +1,223 @@
+---
+title: "Language plugins and the registry system"
+description: "How Transmute's plugin architecture adds language support via a shared registry, base class contract, AST analysis, symbol tables, and equivalence mapping."
+---
+
+Transmute's language support is structured as a plugin system. Each supported language ships as a self-contained plugin that implements a common interface, and a central registry discovers and exposes those plugins to the rest of the system. This design lets you add support for a new language without changing translation or analysis code — you only write the plugin and register it.
+
+## The LanguageRegistry
+
+`LanguageRegistry` is the single source of truth for which languages are available at runtime. It stores plugin instances in a dictionary keyed by language name and loads each plugin's YAML configuration from `config/languages/` on first use.
+
+```python
+class LanguageRegistry:
+    def __init__(self, config_dir: Path = Path("config/languages")):
+        self.config_dir = config_dir
+        self._plugins: Dict[str, LanguagePlugin] = {}
+        self._configs: Dict[str, LanguageConfig] = {}
+```
+
+**Registering a plugin** requires the language name and the plugin class. The registry loads the YAML config for that language (if not already loaded), instantiates the plugin with that config, and stores the instance:
+
+```python
+def register_plugin(
+    self,
+    language_name: str,
+    plugin_class: Type[LanguagePlugin]
+) -> None:
+    if language_name in self._plugins:
+        raise ValueError(
+            f"Plugin already registered for language: {language_name}"
+        )
+
+    # Load config if not already loaded
+    if language_name not in self._configs:
+        self.load_language_config(language_name)
+
+    config = self._configs[language_name]
+    plugin = plugin_class(config)
+    self._plugins[language_name] = plugin
+```
+
+**Checking support** uses `is_supported`, which returns `True` when a plugin is registered for that name:
+
+```python
+def is_supported(self, language_name: str) -> bool:
+    return language_name in self._plugins
+```
+
+Other useful methods:
+
+| Method | Returns |
+|---|---|
+| `get_plugin(name)` | `LanguagePlugin` or `None` |
+| `get_supported_languages()` | `List[str]` of registered names |
+| `detect_language(file_path)` | Language name by file extension, or `None` |
+
+## The LanguagePlugin base class
+
+Every language plugin subclasses `LanguagePlugin` (from `transmute/languages/base.py`) and must implement three abstract methods:
+
+```python
+class LanguagePlugin(ABC):
+
+    @abstractmethod
+    def parse_file(self, file_path: Path) -> Dict[str, Any]:
+        """Parse a source file and extract structure."""
+        pass
+
+    @abstractmethod
+    def detect_features(self, code: str) -> List[str]:
+        """Detect language features used in code."""
+        pass
+
+    @abstractmethod
+    def format_code(self, code: str) -> str:
+        """Format code according to language conventions."""
+        pass
+```
+
+The base class also provides ready-made helpers that all plugins inherit:
+
+- `is_source_file(file_path)` — checks the file extension against `config.extensions`
+- `get_features()` — returns `config.features`
+- `get_frameworks()` — returns `config.frameworks`
+- `supports_feature(feature)` — checks membership in `config.features`
+
+Plugin configuration is supplied by a `LanguageConfig` Pydantic model loaded from YAML. The model carries the language name, display name, version, file extensions, supported features, known frameworks, build tools, package managers, and syntax mappings.
+
+## The six language plugins
+
+<Tabs>
+  <Tab title="Python">
+    `PythonPlugin` uses Python's built-in `ast` module for full AST analysis. Its `parse_file` method returns classes, functions, imports, detected features, and a line count. Feature detection walks the AST to identify: classes, functions, async functions, decorators, generators, comprehensions, context managers, type hints, pattern matching, lambdas, walrus operators, and dataclasses.
+
+    ```python
+    tree = ast.parse(code, filename=str(file_path))
+    result = {
+        'classes': self._extract_classes(tree),
+        'functions': self._extract_functions(tree),
+        'imports': self._extract_imports(tree),
+        'features_used': self.detect_features(code),
+        'line_count': len(code.splitlines()),
+    }
+    ```
+  </Tab>
+  <Tab title="Java">
+    `JavaPlugin` uses regex patterns for parsing (the docstring notes that tree-sitter would be preferable for production). It extracts classes, interfaces, methods, and imports. Feature detection covers: classes, interfaces, inheritance, generics, annotations, lambdas, streams, threads, exceptions, reflection, enums, and records (Java 14+).
+  </Tab>
+  <Tab title="JavaScript">
+    `JavaScriptPlugin` uses the `esprima` library for a full JavaScript AST. It parses the file as either a script or module (falling back to module if script parsing fails) and extracts classes, functions, imports, and exports. AST-based feature detection finds: classes, arrow functions, async/await, generators, template literals, destructuring, spread operators, and promises. A regex fallback handles parse failures.
+  </Tab>
+  <Tab title="TypeScript">
+    `TypeScriptPlugin` extends `JavaScriptPlugin` and adds TypeScript-specific pattern detection on top of the JavaScript feature set. Additional features detected: interfaces, type annotations, generics, enums, type aliases, decorators, namespaces, abstract classes, readonly, and access modifiers (`public`/`private`/`protected`).
+  </Tab>
+  <Tab title="C#">
+    `CSharpPlugin` uses regex-based parsing. Its `parse_file` returns classes, interfaces, methods, and properties. Feature detection covers: classes, interfaces, structs, enums, properties, events, delegates, generics, async/await, LINQ, lambdas, extension methods, attributes, nullable types, pattern matching, records, and init-only setters.
+  </Tab>
+  <Tab title="PHP">
+    `PHPPlugin` uses regex patterns. It extracts classes, interfaces, traits, and functions. Feature detection covers: classes, interfaces, traits, namespaces, functions, closures, generators, attributes (PHP 8+), enums (PHP 8.1+), type hints, return types, nullable types, union types (PHP 8+), named arguments, match expressions, arrow functions, nullsafe operator, visibility modifiers, static, abstract, and final.
+  </Tab>
+</Tabs>
+
+## AST analysis with ASTAnalyzer
+
+`ASTAnalyzer` (from `transmute/languages/ast_analyzer.py`) is an abstract base class for deep structural analysis. It wraps language-specific AST representations in a common `ASTNode` type, enabling consistent traversal across languages.
+
+Each `ASTNode` carries a `node_type` string, an optional `value`, a list of `children`, a `metadata` dictionary, and a `source_location` with line and column numbers.
+
+The abstract `parse` method converts raw source code to an `ASTNode` tree. Concrete implementations (e.g., `PythonASTAnalyzer`) map language-specific nodes to the common `node_type` vocabulary (`function`, `class`, `import`, `for_loop`, `if_statement`, and so on).
+
+Once parsed, `ASTAnalyzer` provides three key operations:
+
+- **`traverse(node, visitor)`** — depth-first traversal calling a visitor function on every node
+- **`find_pattern(node, pattern)`** — returns all nodes where every attribute in `pattern` matches
+- **`get_complexity_metrics(node)`** — returns a dict with `node_count`, `max_depth`, `function_count`, `class_count`, `loop_count`, and `conditional_count`
+
+A module-level helper function ties it together:
+
+```python
+structure = analyze_code_structure(python_code)
+# Returns: functions, classes, variables, imports, metrics
+```
+
+## Symbol tables
+
+`SymbolTable` (from `transmute/languages/symbol_table.py`) tracks every identifier in a codebase, organized by scope. It models the lexical scope chain you'd expect from a real compiler.
+
+**Scopes** are typed (`GLOBAL`, `CLASS`, `FUNCTION`, `BLOCK`) and arranged in a tree. You enter and exit scopes explicitly:
+
+```python
+scope_id = table.enter_scope(ScopeType.FUNCTION, "my_function")
+symbol = table.add_symbol("count", SymbolKind.VARIABLE, line=10)
+table.exit_scope()
+```
+
+**Symbol kinds** include `FUNCTION`, `CLASS`, `VARIABLE`, `PARAMETER`, `METHOD`, `PROPERTY`, `MODULE`, and `CONSTANT`. Each symbol records its name, kind, scope, line/column, type annotations, and a list of definition and reference locations.
+
+**Symbol lookup** walks up the scope chain from the current scope, matching how most languages resolve names:
+
+```python
+symbol = table.lookup_symbol("my_var")
+if symbol:
+    print(f"Found at line {symbol.line}")
+```
+
+Useful aggregate queries:
+
+- `get_symbols_by_kind(kind)` — all symbols of a specific kind
+- `get_unused_symbols()` — symbols with zero references (excluding functions)
+- `get_scope_hierarchy()` — nested dict representation of the scope tree
+- `get_statistics()` — totals for symbols, scopes, functions, classes, variables, unused symbols, and max depth
+
+## Dependency graphs
+
+`DependencyGraph` (from `transmute/languages/dependency_graph.py`) maps relationships between code elements — modules, classes, functions — using a directed graph.
+
+Six dependency types are modelled: `IMPORT`, `INHERITANCE`, `CALLS`, `USES`, `COMPOSITION`, and `AGGREGATION`. Edges are `DependencyEdge` objects with a source, target, type, weight, and metadata.
+
+You build the graph by adding nodes and edges:
+
+```python
+graph.add_dependency("module_a", "module_b", DependencyType.IMPORT)
+graph.add_dependency("ClassC", "ClassA", DependencyType.INHERITANCE)
+```
+
+Key analysis operations:
+
+- **`find_circular_dependencies()`** — DFS-based cycle detection; returns each cycle as a list of node names
+- **`topological_sort()`** — returns a build order, or `None` if cycles exist
+- **`get_impact_analysis(node)`** — BFS to count how many nodes are transitively affected if a given node changes
+- **`get_critical_nodes(top_n)`** — ranks nodes by total impact score
+- **`get_strongly_connected_components()`** — Tarjan's algorithm to find tightly coupled clusters
+- **`export_to_dot()`** — exports to Graphviz DOT format for visualization
+
+## Equivalence matrix
+
+`EquivalenceMatrix` (from `transmute/languages/equivalence_matrix.py`) stores `FeatureMapping` objects that describe how a source-language feature maps to a target-language feature.
+
+Each mapping includes:
+
+- `source_feature` and `target_feature` names
+- `difficulty` — one of `TRIVIAL`, `EASY`, `MODERATE`, `HARD`, `VERY_HARD`, or `IMPOSSIBLE`
+- `notes` explaining the translation approach
+- Example source and target snippets
+
+The matrix ships with built-in mappings for Python→Java, Python→JavaScript, and JavaScript→Java. A sample:
+
+```python
+FeatureMapping(
+    source_feature="list_comprehensions",
+    target_feature="streams",
+    difficulty=TranslationDifficulty.MODERATE,
+    notes="List comprehensions translate to Java Streams API.",
+    example_source="[x*2 for x in items]",
+    example_target="items.stream().map(x -> x*2).collect(Collectors.toList())"
+)
+```
+
+`calculate_translation_difficulty(source_lang, target_lang, features)` scores a list of detected features and returns an average difficulty score, per-feature breakdowns, any unrecognized features, and an `is_feasible` flag.
+
+<Note>
+The `is_feasible` flag is `True` when the average difficulty score is below 7 and there are no unmapped features.
+</Note>

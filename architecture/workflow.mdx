@@ -1,0 +1,270 @@
+---
+title: "LangGraph workflow: state management and execution"
+description: "How Transmute builds a LangGraph StateGraph, sequences agents with directed edges, streams live progress, and checkpoints state for recovery."
+---
+
+Transmute's execution engine is a LangGraph `StateGraph` compiled with a `MemorySaver` checkpointer. The graph defines four nodes — `analyze`, `plan`, `translate`, and `validate` — connected by directed edges that enforce the execution order. All four nodes share a single typed state object (`TransmuteState`) that travels through the graph; each node reads what it needs, returns a dict of updates, and LangGraph applies those updates before handing the state to the next node.
+
+## Building the graph
+
+The `TransmuteWorkflow._build_graph()` method constructs and compiles the `StateGraph` on workflow initialization.
+
+<Steps>
+  <Step title="Create the StateGraph">
+    Instantiate the graph with `TransmuteState` as the typed state schema. This tells LangGraph what fields exist in the state and ensures type safety throughout the pipeline.
+
+    ```python
+    graph = StateGraph(TransmuteState)
+    ```
+  </Step>
+  <Step title="Add nodes">
+    Register each agent wrapper method as a named node. The wrapper is responsible for calling the agent, applying retry logic, and running middleware.
+
+    ```python
+    graph.add_node("analyze",   self._analyze_node)
+    graph.add_node("plan",      self._plan_node)
+    graph.add_node("translate", self._translate_node)
+    graph.add_node("validate",  self._validate_node)
+    ```
+  </Step>
+  <Step title="Define edges">
+    Connect nodes with directed edges to fix the execution order. The entry point is `analyze`; the terminal edge points to LangGraph's built-in `END` sentinel.
+
+    ```python
+    graph.set_entry_point("analyze")
+    graph.add_edge("analyze",   "plan")
+    graph.add_edge("plan",      "translate")
+    graph.add_edge("translate", "validate")
+    graph.add_edge("validate",  END)
+    ```
+  </Step>
+  <Step title="Compile with checkpointing">
+    Compile the graph with a `MemorySaver` checkpointer. LangGraph saves the full state after each node completes, enabling recovery and resume if a run is interrupted.
+
+    ```python
+    memory = MemorySaver()
+    return graph.compile(checkpointer=memory)
+    ```
+  </Step>
+</Steps>
+
+## State update pattern
+
+Agents never modify `TransmuteState` directly. Each agent returns a plain Python dict, and LangGraph merges the dict into the live state before the next node runs.
+
+```python
+# Before AnalysisAgent runs
+state.source_language = None
+state.feature_profile = None
+
+# Agent returns a dict of updates
+updates = {
+    "source_language": LanguageInfo(name="python"),
+    "feature_profile": FeatureProfile(...),
+    "metadata": { **state.metadata, "file_map": {...} },
+    "current_step": "planning"
+}
+
+# After LangGraph merges updates
+state.source_language  # LanguageInfo(name="python")  ✓
+state.feature_profile  # FeatureProfile(...)          ✓
+```
+
+Only keys present in the returned dict are updated. Fields not included in the dict retain their previous values.
+
+## stream() vs invoke()
+
+LangGraph exposes two execution modes. Choose based on whether you need live progress updates or just the final result.
+
+<Tabs>
+  <Tab title="stream()">
+    `stream()` yields a dict after each node completes. The dict contains the node name as a key and the state updates that node produced as the value.
+
+    ```python
+    def stream(
+        self,
+        initial_state: TransmuteState,
+        thread_id: str = "default"
+    ) -> Generator[Dict[str, Any], None, None]:
+        config = {"configurable": {"thread_id": thread_id}}
+
+        for step_output in self.graph.stream(initial_state, config):
+            yield step_output
+    ```
+
+    **Usage** — the CLI uses `stream()` to show a live progress bar:
+
+    ```python
+    for update in workflow.stream(state, thread_id="cli"):
+        for node_name, node_updates in update.items():
+            if node_name == "translate":
+                plan = node_updates.get("migration_plan")
+                completed = len(plan.get_completed_units())
+                print(f"Progress: {completed}/{plan.total_units}")
+    ```
+
+    Each iteration yields one of:
+
+    ```python
+    # After analyze
+    {"analyze": {"source_language": ..., "feature_profile": ..., "current_step": "planning"}}
+
+    # After plan
+    {"plan": {"migration_plan": ..., "current_step": "translation"}}
+
+    # After translate
+    {"translate": {"migration_plan": ..., "current_step": "validation"}}
+
+    # After validate
+    {"validate": {"validation_results": [...], "current_step": "completed"}}
+    ```
+
+    Use `stream()` for CLI output, web UIs, or any context where incremental feedback matters.
+  </Tab>
+  <Tab title="invoke()">
+    `invoke()` blocks until all nodes complete and returns the final `TransmuteState`.
+
+    ```python
+    def run(
+        self,
+        initial_state: TransmuteState,
+        thread_id: str = "default"
+    ) -> TransmuteState:
+        config = {"configurable": {"thread_id": thread_id}}
+        final_state = self.graph.invoke(initial_state, config)
+        return final_state
+    ```
+
+    **Usage** — unit tests and simple scripts:
+
+    ```python
+    workflow = TransmuteWorkflow(registry=LanguageRegistry())
+    state = TransmuteState(
+        session_id="test-001",
+        repository=RepositoryMetadata(url="https://github.com/user/repo", ...),
+        target_language=LanguageInfo(name="java"),
+        metadata={"max_files": 2}
+    )
+
+    final_state = workflow.run(state)
+    print(f"Translated: {len(final_state.migration_plan.translation_units)} files")
+    print(f"Quality: {final_state.metadata['average_quality']:.2f}")
+    ```
+
+    Use `invoke()` when you need only the end result and have no use for intermediate progress.
+  </Tab>
+</Tabs>
+
+## Node methods and middleware
+
+Each `add_node` call registers a wrapper method — not the agent directly. The wrapper applies retry logic and, for the translation node, a middleware pipeline.
+
+**Analysis node** (typical pattern):
+
+```python
+def _analyze_node(self, state: TransmuteState) -> Dict[str, Any]:
+    logger.info("Running analysis...")
+
+    updates = self.retry_handler.execute_with_retry(
+        func=lambda: self.analysis_agent(state)
+    )
+
+    return updates
+```
+
+**Translation node** (with middleware):
+
+```python
+def _translate_node(self, state: TransmuteState) -> Dict[str, Any]:
+    logger.info("Translating code...")
+
+    # Pre-process: normalize code, extract comments
+    processed_state = self.middleware.pre_process(state)
+
+    try:
+        updates = self.retry_handler.execute_with_retry(
+            func=lambda: self.translation_agent(processed_state),
+            fallback=lambda: self._fallback_translation(processed_state)
+        )
+    except Exception as e:
+        logger.error(f"Translation failed: {e}")
+        updates = self._fallback_translation(processed_state)
+
+    # Post-process: restore comments, run quality checks
+    final_updates = self.middleware.post_process(updates)
+
+    return final_updates
+```
+
+The middleware pipeline runs in this order:
+1. `pre_process` — normalizes whitespace, extracts inline comments for preservation
+2. Agent executes (with retry)
+3. `post_process` — restores extracted comments, runs a quality pass on output
+
+## Retry handler
+
+The `RetryHandler` wraps every agent call. On recoverable errors it retries up to three times with exponential backoff, then either invokes the registered fallback or re-raises.
+
+| Attempt | Delay |
+|---------|-------|
+| 1st retry | 2 s |
+| 2nd retry | 4 s |
+| 3rd retry | 8 s |
+| Cap | 30 s |
+
+Retryable errors: API timeouts, rate limits, transient network failures.  
+Non-retryable errors: authentication failures, invalid input, schema validation errors.
+
+```python
+updates = self.retry_handler.execute_with_retry(
+    func=lambda: self.translation_agent(state),
+    fallback=lambda: self._fallback_translation(state)
+)
+```
+
+If all retries are exhausted and a fallback is registered, the fallback creates placeholder translations marked with `confidence_score=0.0` and `status=FAILED`, and the workflow continues to the Validation Agent.
+
+## Checkpointing and recovery
+
+`MemorySaver` records the full `TransmuteState` after every node completes. Subsequent calls to `stream()` or `invoke()` with the same `thread_id` resume from the last successful checkpoint rather than restarting from scratch.
+
+```python
+# First run — saves checkpoints after each node
+workflow.run(state, thread_id="session-123")
+
+# Resume if interrupted — picks up from last checkpoint
+final_state = workflow.run(state, thread_id="session-123")
+```
+
+<Tip>
+Use a consistent `thread_id` derived from the session or repository URL to reliably resume interrupted translations. The `TransmuteState.session_id` field is a natural choice.
+</Tip>
+
+## Complete execution trace
+
+```
+Initialize TransmuteWorkflow
+        │
+        ▼
+_build_graph()
+  StateGraph(TransmuteState)
+  add_node × 4
+  add_edge × 4
+  compile(MemorySaver)
+        │
+        ▼
+stream(initial_state, thread_id="demo")
+        │
+        ├─▶ analyze  →  { source_language, feature_profile, file_map }
+        │              checkpoint saved
+        │
+        ├─▶ plan     →  { migration_plan }
+        │              checkpoint saved
+        │
+        ├─▶ translate →  { migration_plan (with translated_code) }
+        │              checkpoint saved
+        │
+        └─▶ validate →  { validation_results }
+                       checkpoint saved
+                       → END
+```

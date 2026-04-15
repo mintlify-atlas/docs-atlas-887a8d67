@@ -1,0 +1,151 @@
+---
+title: "transmute config — initialize and manage configuration"
+description: "Create a .env template, validate required settings, and inspect current configuration values with the transmute config subcommands."
+---
+
+The `config` command group manages Transmute's runtime configuration. It provides three subcommands: `init` to scaffold a `.env` file, `check` to validate that all required settings are present and services are reachable, and `show` to display current configuration values with sensitive data masked.
+
+## Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `config init` | Create a `.env` template in the current directory |
+| `config check` | Validate environment variables and service connectivity |
+| `config show` | Display all configuration values (API keys masked) |
+
+---
+
+## transmute config init
+
+```bash
+transmute config init [OPTIONS]
+```
+
+Creates a `.env` file in the current working directory pre-filled with all required and optional configuration keys. Edit the file to add your `ANTHROPIC_API_KEY` before running any other commands.
+
+### Options
+
+<ParamField query="--force" type="boolean">
+  Overwrite an existing `.env` file. Without this flag, `config init` exits with an error if `.env` already exists.
+</ParamField>
+
+### What it creates
+
+Running `transmute config init` writes the following `.env` template:
+
+```bash
+# Transmute Configuration
+
+# Anthropic API Key (required)
+# Get your key at: https://console.anthropic.com/
+ANTHROPIC_API_KEY=your_api_key_here
+
+# Qdrant Configuration (optional, for RAG)
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=
+
+# Model Configuration
+CLAUDE_MODEL=claude-sonnet-4-20250514
+
+# Translation Settings
+MAX_RETRIES=3
+CONFIDENCE_THRESHOLD=0.7
+```
+
+<Warning>
+  The generated `.env` file contains a placeholder API key. You must replace `your_api_key_here` with a real Anthropic API key before running `translate` or `analyze`. Get your key at [console.anthropic.com](https://console.anthropic.com/).
+</Warning>
+
+### Examples
+
+```bash
+# Create a fresh .env file
+transmute config init
+
+# Overwrite an existing .env file
+transmute config init --force
+```
+
+---
+
+## transmute config check
+
+```bash
+transmute config check
+```
+
+Validates the three critical prerequisites for running Transmute:
+
+1. **`ANTHROPIC_API_KEY`** — checks that the environment variable is set and is not the placeholder value.
+2. **Qdrant** — makes a live HTTP request to `http://localhost:6333/` to confirm the vector database is running.
+3. **Language configs** — confirms that the `config/languages/` directory exists and counts the number of YAML language definition files.
+
+**Example output (all passing):**
+
+```
+✓ ANTHROPIC_API_KEY: Set
+✓ Qdrant: Running
+✓ Language configs: 6 files
+```
+
+**Example output (failures):**
+
+```
+✗ ANTHROPIC_API_KEY: Not set or invalid
+✗ Qdrant: Not running
+✓ Language configs: 6 files
+```
+
+<Tip>
+  Run `config check` after `config init` and after starting Qdrant to confirm your environment is ready before your first `translate` run.
+</Tip>
+
+---
+
+## transmute config show
+
+```bash
+transmute config show
+```
+
+Prints all configuration values currently loaded from the environment. API key values are masked — only the first 8 and last 4 characters are shown.
+
+**Example output:**
+
+```
+ANTHROPIC_API_KEY: sk-ant-ap...XXXX
+QDRANT_URL: http://localhost:6333
+CLAUDE_MODEL: claude-sonnet-4-20250514
+MAX_RETRIES: 3
+CONFIDENCE_THRESHOLD: 0.7
+```
+
+---
+
+## Configuration reference
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `ANTHROPIC_API_KEY` | Yes | — | API key for Claude Sonnet. Get one at [console.anthropic.com](https://console.anthropic.com/). |
+| `QDRANT_URL` | No | `http://localhost:6333` | URL of the Qdrant vector database used by the RAG system. |
+| `QDRANT_API_KEY` | No | — | API key for a remote Qdrant instance. Leave empty for local Docker deployments. |
+| `CLAUDE_MODEL` | No | `claude-sonnet-4-20250514` | Claude model ID to use for translation. |
+| `MAX_RETRIES` | No | `3` | Number of retry attempts on failed LLM or network calls. |
+| `CONFIDENCE_THRESHOLD` | No | `0.7` | Minimum confidence score (0.0 – 1.0) for a translation unit to be accepted without flagging. |
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Environment variables" icon="key" href="/configuration/environment">
+    Full reference for all environment variables
+  </Card>
+  <Card title="Docker setup" icon="docker" href="/configuration/docker">
+    Start Qdrant with docker-compose
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Full installation guide including Poetry setup
+  </Card>
+  <Card title="transmute translate" icon="arrow-right-arrow-left" href="/cli/translate">
+    Run a translation once configuration is ready
+  </Card>
+</CardGroup>

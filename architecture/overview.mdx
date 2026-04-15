@@ -1,0 +1,113 @@
+---
+title: "Transmute architecture: multi-agent translation pipeline"
+description: "How Transmute's CLI, LangGraph workflow, four specialized agents, and supporting systems work together to translate code repositories."
+---
+
+Transmute is structured as a pipeline of loosely coupled components: a CLI entry point routes user commands into a LangGraph-orchestrated workflow, which coordinates four specialized agents — Analysis, Planning, Translation, and Validation — that read from and write to a shared `TransmuteState`. Three supporting systems (the Language Registry, RAG System, and Claude API Client) provide the language knowledge, pattern context, and AI translation capabilities that the agents depend on. A Retry Handler and Middleware pipeline wrap every agent call to handle transient failures and normalize code in transit.
+
+## Component overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   Transmute CLI                         │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+         ┌────────────┴────────────┐
+         │  LangGraph Workflow     │
+         │  (TransmuteState)       │
+         └────────────┬────────────┘
+                      │
+    ┌─────────────────┼─────────────────┐
+    │                 │                 │
+┌───▼────┐    ┌──────▼─────┐     ┌─────▼──────┐
+│Analysis│───▶│  Planning  │────▶│Translation │
+│ Agent  │    │   Agent    │     │   Agent    │
+└────────┘    └────────────┘     └─────┬──────┘
+                                       │
+                                ┌──────▼─────┐
+                                │ Validation │
+                                │   Agent    │
+                                └────────────┘
+
+Supporting systems:
+  • Language Registry (6 language plugins)
+  • RAG System (Qdrant + sentence-transformers)
+  • Claude API Client (Claude Sonnet)
+  • Retry Handler + Middleware pipeline
+```
+
+## CLI layer
+
+The `transmute` CLI is the entry point for all user interactions. Commands like `transmute translate` and `transmute analyze` construct an initial `TransmuteState`, initialize the `TransmuteWorkflow`, and hand off to the LangGraph execution engine. In the `translate` command, the CLI uses `workflow.stream()` to receive per-node updates and render a live progress bar as each agent completes.
+
+## LangGraph workflow
+
+The `TransmuteWorkflow` class builds a `StateGraph(TransmuteState)` at initialization. Each agent is registered as a named node, connected with directed edges that define the execution order. The graph is compiled with a `MemorySaver` checkpointer, enabling state recovery and session resumption if a run is interrupted.
+
+See [LangGraph workflow: state management and execution](/architecture/workflow) for full construction and streaming details.
+
+## The four agents
+
+Each agent is an independent class that receives the current `TransmuteState`, performs its work, and returns a dict of state updates. LangGraph merges those updates into the shared state before passing it to the next node. Agents never call each other directly.
+
+<CardGroup cols={2}>
+  <Card title="Analysis Agent" icon="magnifying-glass" href="/architecture/agents">
+    Clones the repository, detects the source language, and builds a `FeatureProfile` with complexity score, design patterns, and a file map.
+  </Card>
+  <Card title="Planning Agent" icon="list-check" href="/architecture/agents">
+    Selects a translation strategy based on complexity score and creates a `MigrationPlan` with one `TranslationUnit` per file.
+  </Card>
+  <Card title="Translation Agent" icon="code" href="/architecture/agents">
+    Loads source code for each pending unit, optionally retrieves RAG context, then calls Claude to produce translated code and a confidence score.
+  </Card>
+  <Card title="Validation Agent" icon="shield-check" href="/architecture/agents">
+    Checks syntax validity, calculates a `quality_score` for each completed unit, and writes `ValidationResult` objects back into state.
+  </Card>
+</CardGroup>
+
+## Supporting systems
+
+### Language Registry
+
+The Language Registry holds plugin configurations for Python, Java, JavaScript, TypeScript, C#, and PHP. Each plugin defines file extensions, feature mappings, and AST parsing rules used by the Analysis and Planning agents. The registry is injected into both agents at workflow initialization.
+
+### RAG system
+
+The RAG system connects to a Qdrant vector database and uses sentence-transformers embeddings to index and retrieve similar code patterns. When the Translation Agent calls `rag_system.retrieve_context()`, it passes the first 500 characters of the source file along with the source and target language names. Qdrant returns the top-k most similar patterns, which are included in the Claude prompt as contextual examples.
+
+<Note>
+The RAG system is optional. If `rag_system` is `None`, the Translation Agent falls back to a direct Claude call without pattern context.
+</Note>
+
+### Claude API client
+
+`ClaudeClient` wraps the Anthropic SDK and exposes a single `translate_code()` method. It receives the source code, language pair, `FeatureProfile`, and optional RAG patterns, then formats and dispatches the prompt to Claude Sonnet. The response is parsed to extract `translated_code`, `confidence`, and an `explanation` string.
+
+### Retry handler and middleware
+
+Every agent node is wrapped by a `RetryHandler` that re-executes the agent function on recoverable errors (API timeouts, rate limits) with exponential backoff: 2 s, 4 s, 8 s, capped at 30 s, up to 3 attempts. If all retries fail, the Translation Agent falls back to a placeholder output rather than stopping the workflow.
+
+The Middleware pipeline runs `pre_process()` before translation (normalizing code, extracting comments) and `post_process()` after (restoring comments, running quality checks).
+
+## Data flow summary
+
+```
+CLI constructs TransmuteState
+        │
+        ▼
+Analysis Agent  →  { source_language, feature_profile, metadata['file_map'] }
+        │
+        ▼
+Planning Agent  →  { migration_plan }
+        │
+        ▼
+Translation Agent  →  { migration_plan (units with translated_code + confidence_score) }
+        │
+        ▼
+Validation Agent  →  { validation_results }
+        │
+        ▼
+CLI reads final state and renders results
+```
+
+Each arrow represents LangGraph merging the agent's returned dict into `TransmuteState` before the next node executes.

@@ -1,0 +1,197 @@
+---
+title: "How RAG enhances translation context and quality"
+description: "Transmute's RAG system embeds code into Qdrant vectors and retrieves similar translation patterns at runtime to give Claude richer, more accurate context."
+---
+
+When Transmute translates a file, it does more than send the raw source to Claude. The RAG (Retrieval-Augmented Generation) system queries a Qdrant vector database for previously stored code translation pairs that are semantically similar to the current file. These patterns are injected into the prompt as concrete before/after examples, giving Claude context about how specific idioms and constructs should appear in the target language.
+
+## How the system works
+
+The RAG pipeline has three stages: embed, store, and retrieve.
+
+<Steps>
+  <Step title="Embed">
+    The `EmbeddingGenerator` uses `sentence-transformers/all-MiniLM-L6-v2` to convert code snippets into 384-dimensional vectors. The model encodes both the source code and a human-readable description, concatenated:
+
+    ```python
+    text = f"{source_code}\n{description}"
+    embedding = self.embedding_gen.generate_embedding(text)
+    ```
+
+    The resulting vector captures semantic meaning — similar code structures end up close together in vector space regardless of minor syntactic differences.
+  </Step>
+  <Step title="Store">
+    Patterns are stored in a Qdrant collection named `transmute-code` (configurable). Each point in the collection carries the full code payload alongside its vector:
+
+    ```python
+    # Payload stored per pattern
+    {
+        'source_code': '...',
+        'target_code': '...',
+        'source_language': 'python',
+        'target_language': 'java',
+        'feature': 'for_loop',
+        'description': '...'
+    }
+    ```
+
+    Qdrant uses cosine distance for similarity comparisons.
+  </Step>
+  <Step title="Retrieve">
+    At translation time, `RAGSystem.retrieve_context()` embeds the source code being translated and runs a filtered similarity search, scoping results to the exact source/target language pair:
+
+    ```python
+    patterns = rag.retrieve_context(
+        query_code="for item in items:\n    print(item)",
+        source_language="python",
+        target_language="java",
+        top_k=5,
+        score_threshold=0.7
+    )
+    ```
+
+    Only patterns with a similarity score at or above `score_threshold` are returned, ensuring the LLM only sees relevant examples.
+  </Step>
+</Steps>
+
+## Configuration
+
+The RAG system reads its settings from `config/default.yaml`:
+
+```yaml
+transmute:
+  rag:
+    vector_store: "qdrant"
+    qdrant_url: "http://localhost:6333"
+    embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+    collection_name: "transmute-code"
+    chunk_size: 1000
+    chunk_overlap: 200
+    top_k: 5
+    similarity_threshold: 0.7
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `qdrant_url` | `http://localhost:6333` | Qdrant server URL. Use a cloud URL for Qdrant Cloud. |
+| `embedding_model` | `sentence-transformers/all-MiniLM-L6-v2` | Sentence transformer model. Changing this requires re-indexing all patterns. |
+| `collection_name` | `transmute-code` | Qdrant collection that stores all patterns. |
+| `top_k` | `5` | Maximum number of patterns returned per query. |
+| `similarity_threshold` | `0.7` | Minimum cosine similarity score. Lower values return more (but less relevant) patterns. |
+| `chunk_size` | `1000` | Maximum characters per code chunk when indexing large files. |
+| `chunk_overlap` | `200` | Character overlap between adjacent chunks to preserve context at boundaries. |
+
+You can also set the Qdrant URL and API key via environment variables:
+
+```bash
+export QDRANT_URL=https://your-cluster.qdrant.io
+export QDRANT_API_KEY=your_api_key
+```
+
+## How pattern retrieval improves translation quality
+
+Without RAG, Claude translates each file using only its general knowledge of both languages. With RAG, it also receives concrete, project-specific examples that demonstrate how your codebase's patterns should map to the target language.
+
+**Example — async Python to JavaScript:**
+
+Suppose the RAG index contains this previously stored pair:
+
+```python
+# Source (Python)
+async def fetch_data(url: str) -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            return await response.json()
+```
+
+```javascript
+// Target (JavaScript) — stored translation
+async function fetchData(url) {
+  const response = await fetch(url);
+  return response.json();
+}
+```
+
+When translating a new async Python function, `retrieve_context()` returns this pair with a high similarity score. Claude sees that `aiohttp` async sessions should become `fetch()` calls in JavaScript, producing idiomatic output rather than a mechanical transliteration.
+
+```python
+# Translation hint format returned by get_translation_hints()
+"""
+Similar translation patterns:
+1. Similarity: 0.92
+   Source: async def fetch_data(url: str) -> dict:...
+   Target: async function fetchData(url) {...
+   Note: aiohttp → fetch, async with → async/await
+"""
+```
+
+## When to skip RAG with `--no-rag`
+
+RAG requires a running Qdrant instance and adds a network round-trip per file. Skip it when:
+
+- Qdrant is not available in your environment
+- You are translating a codebase with highly unique patterns not yet in the index
+- You want maximum translation speed and are confident in Direct strategy results
+
+```bash
+# Translate without querying Qdrant
+transmute translate https://github.com/user/repo \
+    --to javascript \
+    --no-rag
+```
+
+<Note>
+  The Pattern and Refactor strategies set `use_rag: True` in their context, signaling the Translation Agent to call `retrieve_context()`. Passing `--no-rag` overrides this flag globally and the Translation Agent skips the Qdrant query for all units.
+</Note>
+
+## Managing the pattern index
+
+You can build, inspect, and export the pattern index from Python:
+
+```python
+from transmute.rag.rag_system import RAGSystem
+
+rag = RAGSystem(
+    embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+    qdrant_url="http://localhost:6333",
+    collection_name="transmute-code"
+)
+
+# Add a single pattern
+pattern_id = rag.add_pattern(
+    source_code="for item in items:",
+    target_code="for (Item item : items) {",
+    source_language="python",
+    target_language="java",
+    feature="for_loop",
+    description="Python for-in loop to Java enhanced for loop"
+)
+
+# Bulk-index patterns from a list
+count = rag.build_pattern_index(patterns)
+
+# Check index size
+stats = rag.get_statistics()
+print(f"Total patterns: {stats['total_patterns']}")
+print(f"Embedding model: {stats['embedding_model']}")
+print(f"Embedding dim: {stats['embedding_dim']}")
+
+# Export and import for backup or sharing
+rag.export_patterns(Path("patterns.json"))
+rag.import_patterns(Path("patterns.json"))
+```
+
+<Warning>
+  Calling `rag.clear_collection()` deletes all stored patterns permanently. The collection is immediately recreated as empty — there is no undo.
+</Warning>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Translation strategies" icon="brain" href="/guides/translation-strategies">
+    See how Pattern and Refactor strategies use RAG context
+  </Card>
+  <Card title="RAG internals" icon="microchip" href="/architecture/rag-internals">
+    Deep dive into embeddings, vector storage, and similarity search
+  </Card>
+</CardGroup>

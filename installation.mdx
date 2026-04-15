@@ -1,0 +1,156 @@
+---
+title: "Install Transmute and configure dependencies"
+description: "Install Transmute via Poetry, configure your Anthropic API key, and optionally start Qdrant with Docker Compose for RAG-powered translation."
+---
+
+Transmute is distributed as a Python package managed with Poetry. This page covers system requirements, installation steps, environment configuration, and how to start the optional Qdrant vector database. By the end you will have a working `transmute` command available in your terminal.
+
+## System requirements
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| Python | 3.12 or later | Required |
+| Poetry | Any current | Dependency and virtualenv management |
+| Docker | Any current | Required only for Qdrant (RAG) |
+
+<Note>
+  Docker is not required to run Transmute. If you skip it, pass `--no-rag` when running translations. See [Skipping Qdrant](#skipping-qdrant-with---no-rag) below.
+</Note>
+
+## Install with Poetry
+
+Clone the repository and install all dependencies:
+
+```bash
+git clone https://github.com/Oussiddi/Transmute.git
+cd Transmute
+poetry install
+```
+
+Poetry resolves and installs all dependencies from `pyproject.toml` into an isolated virtual environment, including LangChain, LangGraph, Qdrant client, Tree-sitter, sentence-transformers, and the Anthropic SDK.
+
+## Verify the installation
+
+Confirm the `transmute` CLI is available:
+
+```bash
+transmute --version
+```
+
+If the command is not found, activate the Poetry shell first:
+
+```bash
+poetry shell
+transmute --version
+```
+
+## Configure the Anthropic API key
+
+Transmute calls the Anthropic API for every translation. Set your key as an environment variable:
+
+```bash
+export ANTHROPIC_API_KEY="your_api_key_here"
+```
+
+To persist it across sessions, add the export to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.).
+
+Alternatively, create a `.env` file in the project root. Transmute loads it automatically via `python-dotenv`:
+
+```bash
+# .env
+ANTHROPIC_API_KEY="your_api_key_here"
+```
+
+<Warning>
+  Never commit your `.env` file or API key to version control. The repository's `.gitignore` already excludes `.env`.
+</Warning>
+
+## Optional environment variables
+
+These variables are optional. Transmute uses sensible defaults when they are not set.
+
+```bash
+# Qdrant connection (defaults shown)
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=
+
+# Model selection
+CLAUDE_MODEL=claude-sonnet-4-20250514
+
+# Reliability settings
+MAX_RETRIES=3
+CONFIDENCE_THRESHOLD=0.7
+
+# GitHub token for private repositories
+GITHUB_TOKEN=
+
+# Logging
+LOG_LEVEL=INFO
+```
+
+## Start Qdrant (recommended)
+
+<Tabs>
+  <Tab title="With Qdrant (recommended)">
+    Start the Qdrant container using the included `docker-compose.yml`:
+
+    ```bash
+    docker-compose up -d
+    ```
+
+    This starts Qdrant on port `6333` (HTTP API) and `6334` (gRPC). Data is persisted in a named Docker volume (`qdrant_storage`) so translation patterns survive container restarts.
+
+    Confirm Qdrant is healthy:
+
+    ```bash
+    curl http://localhost:6333/
+    ```
+
+    To stop Qdrant:
+
+    ```bash
+    docker-compose down
+    ```
+
+    <Tip>
+      With Qdrant running, Transmute can use the Pattern strategy, which retrieves similar translation examples from the vector store to improve output quality on medium-complexity code.
+    </Tip>
+  </Tab>
+  <Tab title="Without RAG (--no-rag)">
+    If you prefer not to run Docker, skip Qdrant entirely and pass `--no-rag` to each `transmute translate` call:
+
+    ```bash
+    transmute translate https://github.com/faif/python-patterns --to java --no-rag
+    ```
+
+    With `--no-rag`, the Pattern strategy is disabled. Transmute selects between Direct and Refactor based on code complexity. This is suitable for simple codebases or when running in environments where Docker is unavailable.
+
+    <Note>
+      Translation quality on medium- to high-complexity repositories is generally better with RAG enabled.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Install dev dependencies
+
+To contribute to Transmute or run the test suite, install the dev dependency group:
+
+```bash
+poetry install --with dev
+```
+
+This adds pytest, pytest-asyncio, pytest-cov, black, ruff, and mypy to your environment.
+
+Run the tests to confirm everything is set up correctly:
+
+```bash
+poetry run pytest tests/ -v
+```
+
+Run the linters:
+
+```bash
+poetry run black src/ tests/
+poetry run ruff check src/ tests/
+poetry run mypy src/
+```

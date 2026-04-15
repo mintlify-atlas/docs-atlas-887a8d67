@@ -1,0 +1,191 @@
+---
+title: "RAG system internals: embeddings and vector search"
+description: "How Transmute's RAG layer uses sentence-transformer embeddings and a Qdrant vector store to surface relevant translation patterns at query time."
+---
+
+Transmute uses a retrieval-augmented generation (RAG) pipeline to supply the translation agent with concrete examples of how source-language constructs map to target-language code. Rather than relying on the LLM's training data alone, the system embeds a curated library of translation patterns and retrieves the most semantically similar ones at translation time, sending them as context alongside the source code.
+
+The three core components are `EmbeddingGenerator`, `VectorStore`, and `RAGSystem`. `EmbeddingGenerator` converts code text to dense vectors. `VectorStore` wraps a Qdrant client and handles persistence and search. `RAGSystem` orchestrates them both.
+
+## EmbeddingGenerator
+
+`EmbeddingGenerator` (from `transmute/rag/embeddings.py`) loads a sentence-transformer model and exposes methods to turn code strings into numpy vectors.
+
+The default model is `sentence-transformers/all-MiniLM-L6-v2`, which produces 384-dimensional embeddings. It balances speed and quality well for code text.
+
+```python
+class EmbeddingGenerator:
+    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+        self.model_name = model_name
+        self.model = SentenceTransformer(model_name)
+
+    def generate_embedding(self, text: str) -> np.ndarray:
+        embedding = self.model.encode(text, convert_to_numpy=True)
+        return embedding  # shape: (384,)
+
+    def get_embedding_dim(self) -> int:
+        return self.model.get_sentence_embedding_dimension()
+```
+
+`generate_embeddings(texts)` accepts a list and returns a `(N, 384)` array, useful for batch indexing.
+
+## VectorStore
+
+`VectorStore` (from `transmute/rag/vector_store.py`) wraps the Qdrant client. It manages a single collection named `transmute-code` by default and uses cosine similarity for ranking.
+
+**Collection management** — on initialization, `create_collection` checks whether the collection already exists before creating it:
+
+```python
+self.client.create_collection(
+    collection_name=self.collection_name,
+    vectors_config=VectorParams(
+        size=embedding_dim,
+        distance=Distance.COSINE
+    )
+)
+```
+
+**Storing a pattern** — `store_pattern` takes a `CodePattern` dataclass and a pre-computed embedding, then calls `client.upsert`:
+
+```python
+point = PointStruct(
+    id=pattern.id,
+    vector=embedding,
+    payload={
+        'source_code': pattern.source_code,
+        'target_code': pattern.target_code,
+        'source_language': pattern.source_language,
+        'target_language': pattern.target_language,
+        'feature': pattern.feature,
+        'description': pattern.description,
+        **pattern.metadata
+    }
+)
+self.client.upsert(collection_name=self.collection_name, points=[point])
+```
+
+**Searching** — `search_similar` builds a Qdrant `Filter` from the provided key-value pairs and calls `client.query_points`:
+
+```python
+results = store.search_similar(
+    query_embedding=embedding.tolist(),
+    top_k=5,
+    score_threshold=0.7,
+    filters={'source_language': 'python', 'target_language': 'java'}
+)
+```
+
+Each result is a dict containing `id`, `score`, and all payload fields (`source_code`, `target_code`, `feature`, `description`, and any metadata).
+
+`CodePattern` is a plain dataclass:
+
+```python
+@dataclass
+class CodePattern:
+    id: str
+    source_code: str
+    target_code: str
+    source_language: str
+    target_language: str
+    feature: str
+    description: str = ""
+    metadata: Dict[str, Any] = None
+```
+
+## RAGSystem
+
+`RAGSystem` (from `transmute/rag/rag_system.py`) ties embedding generation and vector search together. Its constructor wires up both components and creates the Qdrant collection:
+
+```python
+class RAGSystem:
+    def __init__(
+        self,
+        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        qdrant_url: str = "http://localhost:6333",
+        qdrant_api_key: Optional[str] = None,
+        collection_name: str = "transmute-code"
+    ):
+        self.embedding_gen = EmbeddingGenerator(model_name=embedding_model)
+        self.vector_store = VectorStore(
+            url=qdrant_url,
+            api_key=qdrant_api_key,
+            collection_name=collection_name
+        )
+        embedding_dim = self.embedding_gen.get_embedding_dim()
+        self.vector_store.create_collection(embedding_dim)
+```
+
+## The retrieve_context flow
+
+`retrieve_context` is the method called during translation. It embeds the query code, applies language-pair filters, and returns up to `top_k` patterns whose cosine similarity exceeds `score_threshold`.
+
+```python
+patterns = rag.retrieve_context(
+    query_code="for item in items:\n    print(item)",
+    source_language="python",
+    target_language="java",
+    top_k=5,
+    score_threshold=0.7
+)
+
+for pattern in patterns:
+    print(f"Score: {pattern['score']:.2f}")
+    print(f"Target: {pattern['target_code']}")
+```
+
+The default parameters are `top_k=5` and `score_threshold=0.7`.
+
+<Steps>
+  <Step title="Embed the query">
+    `EmbeddingGenerator.generate_embedding(query_code)` encodes the source code string into a 384-dimensional numpy vector using the `all-MiniLM-L6-v2` model.
+  </Step>
+  <Step title="Build language filters">
+    A filter dict `{'source_language': source_language, 'target_language': target_language}` is constructed. Qdrant translates this into payload field conditions so only patterns in the correct language pair are considered.
+  </Step>
+  <Step title="Query the vector store">
+    `VectorStore.search_similar` calls `client.query_points` with the embedding, `limit=top_k`, the constructed filter, and the similarity threshold. Qdrant returns at most `top_k` points with scores at or above the threshold.
+  </Step>
+  <Step title="Return results">
+    Each result is a flat dict with the point's `id`, `score`, and payload fields. `RAGSystem` returns the list to the caller as-is — the translation agent receives it as context.
+  </Step>
+</Steps>
+
+## Indexing patterns
+
+Patterns are added individually with `add_pattern` or in bulk with `build_pattern_index`.
+
+`add_pattern` concatenates the source code and description, generates an embedding from the combined text, then stores a `CodePattern` with a fresh UUID:
+
+```python
+text = f"{source_code}\n{description}"
+embedding = self.embedding_gen.generate_embedding(text)
+pattern_id = self.vector_store.store_pattern(pattern, embedding.tolist())
+```
+
+`build_pattern_index` iterates over a list of pattern dicts, calls `add_pattern` for each, and returns the count of successfully stored patterns. Failures are logged and skipped rather than raising.
+
+## Re-ranking results
+
+After retrieval, `rank_results` applies optional score boosts:
+
+- **Framework boost** — multiplies the score by 1.2 if `boost_framework` appears in the pattern description
+- **Verified boost** — multiplies the score by 1.1 for patterns with `verified: True` in metadata
+
+Scores are capped at 1.0, and the list is re-sorted by adjusted score. This lets callers promote patterns from known-good sources without rewriting the embedding or filter logic.
+
+## Chunk parameters
+
+<Note>
+Transmute uses `chunk_size=1000` and `chunk_overlap=200` when splitting large source files before indexing. This ensures long files are represented by multiple overlapping segments, reducing the chance that a relevant snippet falls across a chunk boundary.
+</Note>
+
+## Configuration reference
+
+| Parameter | Default | Description |
+|---|---|---|
+| `embedding_model` | `sentence-transformers/all-MiniLM-L6-v2` | Sentence transformer model |
+| `qdrant_url` | `http://localhost:6333` | Qdrant server URL |
+| `collection_name` | `transmute-code` | Qdrant collection name |
+| `top_k` | `5` | Max patterns returned per query |
+| `score_threshold` | `0.7` | Minimum cosine similarity |
+| Embedding dimension | `384` | Output size of `all-MiniLM-L6-v2` |

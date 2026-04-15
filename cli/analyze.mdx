@@ -1,0 +1,110 @@
+---
+title: "transmute analyze — inspect a repository before translation"
+description: "Detect source language, measure complexity, and surface features and design patterns in a repository before committing to a full translation run."
+---
+
+The `analyze` command runs Transmute's Analysis Agent against a repository without performing any translation. Use it to understand the scope and complexity of a migration before running `translate` — the output tells you the primary language, a complexity score, detected design patterns, frameworks, and top external dependencies.
+
+## Usage
+
+```bash
+transmute analyze <REPOSITORY> [OPTIONS]
+```
+
+## Arguments
+
+<ParamField path="REPOSITORY" type="string" required>
+  The repository to analyze. Accepts either a GitHub URL (`https://github.com/user/repo`) or a local path (`./my-app`).
+</ParamField>
+
+## Options
+
+<ParamField query="--branch" type="string" default="main">
+  Git branch to clone when `REPOSITORY` is a remote URL.
+
+  Shorthand: `-b`
+</ParamField>
+
+<ParamField query="--detailed" type="boolean">
+  Show extended analysis output. In addition to the repository information table and complexity score, the detailed view includes:
+
+  - **Features used** — top 15 language features ranked by occurrence count (e.g. `classes: 45`, `decorators: 23`)
+  - **Design patterns detected** — names of patterns found via AST analysis (e.g. Singleton, Factory, Observer)
+  - **Framework detected** — the primary framework or test runner
+  - **External dependencies** — up to 10 external package names, with a count of any additional ones
+</ParamField>
+
+## Examples
+
+### Basic analysis
+
+```bash
+transmute analyze https://github.com/user/repo
+```
+
+Prints language, complexity score, and a repository information table.
+
+### Detailed analysis
+
+```bash
+transmute analyze https://github.com/faif/python-patterns --detailed
+```
+
+**Output:**
+
+```
+Repository Information:
+  Language: Python
+  Complexity: 0.43 (Medium)
+
+Features Used:
+  • classes: 45
+  • functions: 120
+  • decorators: 23
+
+Design Patterns: Singleton, Factory, Observer
+Framework: pytest
+```
+
+### Analyze a specific branch
+
+```bash
+transmute analyze https://github.com/user/repo --branch develop
+```
+
+### Analyze a local directory
+
+```bash
+transmute analyze ./my-app --detailed
+```
+
+## Understanding the complexity score
+
+The complexity score is a float between `0.0` and `1.0` produced by the Analysis Agent based on AST depth, feature count, and cross-file dependencies:
+
+| Score range | Level  | Recommended strategy    |
+|-------------|--------|-------------------------|
+| `< 0.3`     | Low    | `direct`                |
+| `0.3 – 0.7` | Medium | `pattern`               |
+| `> 0.5`     | High   | `refactor` or `hybrid`  |
+
+<Tip>
+  Run `analyze --detailed` before a large migration to identify hard-to-translate patterns (e.g. metaclasses, decorators, async generators) that may need the `refactor` strategy or manual `--hitl` review.
+</Tip>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="transmute translate" icon="arrow-right-arrow-left" href="/cli/translate">
+    Run a full translation after analyzing the repository
+  </Card>
+  <Card title="transmute strategies" icon="list" href="/cli/strategies">
+    Choose the right strategy based on your complexity score
+  </Card>
+  <Card title="Translation strategies guide" icon="wand-magic-sparkles" href="/guides/translation-strategies">
+    Deep dive into how each strategy works
+  </Card>
+  <Card title="Architecture: agents" icon="diagram-project" href="/architecture/agents">
+    How the Analysis Agent works internally
+  </Card>
+</CardGroup>
